@@ -154,6 +154,9 @@ func TestConfigLogRotationIntegration(t *testing.T) {
 		t.Error("log file should have been created")
 	}
 
+	// Explicitly close log file to prevent file locking issues on Windows
+	config.CloseLogFile()
+
 	// Force garbage collection to help close any open file handles
 	runtime.GC()
 	time.Sleep(10 * time.Millisecond)

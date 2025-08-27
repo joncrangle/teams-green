@@ -47,32 +47,40 @@ func HandleConnection(ws *websocket.Conn, state *ServiceState) {
 			slog.String("remote_addr", ws.Request().RemoteAddr))
 	}()
 
-	// Handle ping/pong and detect disconnects
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	// Separate goroutine for ping/pong handling
+	pingDone := make(chan struct{})
+	go func() {
+		defer close(pingDone)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			// Send a ping message
-			if err := websocket.Message.Send(ws, `{"type":"ping"}`); err != nil {
-				state.Logger.Debug("WebSocket ping failed", slog.String("error", err.Error()))
-				return
-			}
-		default:
-			// Read messages to detect client disconnect
-			var msg string
-			err := websocket.Message.Receive(ws, &msg)
-			if err != nil {
-				if err != io.EOF {
-					state.Logger.Debug("WebSocket read error", slog.String("error", err.Error()))
+		for {
+			select {
+			case <-ticker.C:
+				if err := websocket.Message.Send(ws, `{"type":"ping"}`); err != nil {
+					state.Logger.Debug("WebSocket ping failed", slog.String("error", err.Error()))
+					return
 				}
+			case <-pingDone:
 				return
-			}
-			// Handle pong or other messages
-			if strings.Contains(msg, "pong") {
-				continue
 			}
 		}
+	}()
+
+	// Message reading loop
+	for {
+		var msg string
+		err := websocket.Message.Receive(ws, &msg)
+		if err != nil {
+			if err != io.EOF {
+				state.Logger.Debug("WebSocket read error", slog.String("error", err.Error()))
+			}
+			return
+		}
+		// Handle pong or other messages
+		if strings.Contains(msg, "pong") {
+			continue
+		}
+		// Handle other message types here if needed
 	}
 }

@@ -1,25 +1,29 @@
 AGENTS guide for teams-green
 
-Build/lint
+Build/lint/test
 - Build: just build
+- Test all: just test (or go test ./...)
+- Test single package: go test ./internal/service (or go test -v ./internal/service for verbose)
+- Test specific function: go test -run TestFunctionName ./path/to/package
 - Run CLI: go run . [start|stop|status|toggle] [flags]
-- Lint: just lint
-- Format: just fmt (CI should fail on unformatted code)
+- Lint: just lint (golangci-lint run)
+- Format: just fmt (golangci-lint fmt)
+- Fix lint issues: just fix
 
 Project style
-- Modules: Go 1.25, module name "github.com/joncrangle/teams-green"; keep imports grouped stdlib/third-party/local; no relative imports.
-- Formatting: always run go fmt; keep lines <120 chars; keep emojis out of code/logs unless UX-critical; CLI user messages can use emojis.
-- Types: prefer explicit types and zero-value-safe structs; avoid interface{}—define small interfaces if needed.
-- Errors: return error values, wrap with context using fmt.Errorf("...: %w", err); never panic in libraries; main/cmd converts errors to user-friendly messages. Use slog for logs (config.InitLogger). Log levels: Debug for loop details, Info for lifecycle, Warn for transient issues, Error for failures.
-- Concurrency: guard shared state with RWMutex; avoid data races; use context for cancellation; prefer time.Ticker over sleeps in loops.
-- Naming: Exported names are PascalCase, unexported camelCase; commands end with Cmd; files use snake_case where applicable; constants UPPER_SNAKE only if truly constant.
-- Imports: prefer standard libs first, then external (github.com/.../..., golang.org/x/...), then local (teams-green/internal/...); keep aliasing minimal; remove unused imports.
-- CLI: cobra commands live under cmd/; add flags to commands in init; default command remains start.
-- Windows: this repo is Windows-focused; keep syscall/win32 usage in internal/service; isolate platform code for portability.
-- WebSocket: use golang.org/x/net/websocket; send JSON-encoded Event; broadcast under internal/websocket; timestamp server-side.
-- PID handling: PID file path comes from internal/config; clean stale PID on failures.
+- Go 1.25.0, module "github.com/joncrangle/teams-green"; imports: stdlib/external/local; no relative imports
+- Formatting: always run go fmt; lines <120 chars; no emojis in code/logs (CLI messages ok)
+- Types: explicit types, zero-value-safe structs; avoid interface{}—use small interfaces
+- Errors: return errors, wrap with fmt.Errorf("context: %w", err); no panic in libs; use slog (config.InitLogger)
+- Log levels: Debug (loop details), Info (lifecycle), Warn (transient), Error (failures)
+- Concurrency: RWMutex for shared state; context for cancellation; time.Ticker over sleep loops
+- Naming: PascalCase (exported), camelCase (unexported); commands end Cmd; files snake_case; constants UPPER_SNAKE
+- CLI: cobra commands in cmd/; flags in init(); default command is start
+- Windows-focused: syscall/win32 in internal/service; isolate platform code
+- WebSocket: golang.org/x/net/websocket; JSON Events; broadcast in internal/websocket; server timestamps
+- Testing: table-driven tests preferred; use testify/assert if needed; mock external dependencies
 
 AI/coding agents
-- No Cursor/Copilot instruction files are present; follow rules above.
-- Before committing, run: just lint
-- When adding deps, update go.mod/go.sum with: go get <module>@version; run go mod tidy.
+- No Cursor/Copilot files present; follow above rules
+- Before commit: just lint && just test
+- Add deps: go get module@version && go mod tidy

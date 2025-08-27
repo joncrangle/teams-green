@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/websocket"
@@ -26,14 +27,14 @@ type ServiceState struct {
 var (
 	server        *http.Server
 	serverMux     sync.Mutex
-	serverRunning bool
+	serverRunning int32 // Use atomic int32 instead of bool
 )
 
 func StartServer(port int, state *ServiceState) error {
 	serverMux.Lock()
 	defer serverMux.Unlock()
 
-	if serverRunning {
+	if atomic.LoadInt32(&serverRunning) == 1 {
 		return fmt.Errorf("websocket server is already running")
 	}
 
@@ -56,18 +57,25 @@ func StartServer(port int, state *ServiceState) error {
 		WriteTimeout: 15 * time.Second,
 	}
 
+	// Use a channel to wait for server to actually start
+	serverStarted := make(chan error, 1)
+
 	go func() {
 		state.Logger.Info("WebSocket server starting",
 			slog.String("address", fmt.Sprintf("ws://127.0.0.1:%d/ws", port)))
+
+		// Signal that server is starting
+		serverStarted <- nil
+
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			state.Logger.Error("WebSocket server error", slog.String("error", err.Error()))
-			serverMux.Lock()
-			serverRunning = false
-			serverMux.Unlock()
+			atomic.StoreInt32(&serverRunning, 0)
 		}
 	}()
 
-	serverRunning = true
+	// Wait for server to start
+	<-serverStarted
+	atomic.StoreInt32(&serverRunning, 1)
 	return nil
 }
 
@@ -75,10 +83,10 @@ func StopServer() {
 	serverMux.Lock()
 	defer serverMux.Unlock()
 
-	if server != nil && serverRunning {
+	if server != nil && atomic.LoadInt32(&serverRunning) == 1 {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
-		serverRunning = false
+		atomic.StoreInt32(&serverRunning, 0)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,6 +27,27 @@ type Config struct {
 }
 
 var PidFile string
+
+// Global log file handle that can be closed properly
+var (
+	logFile      *os.File
+	logFileMutex sync.Mutex
+)
+
+type LogFileCloser struct {
+	*os.File
+}
+
+func (lfc *LogFileCloser) Close() error {
+	logFileMutex.Lock()
+	defer logFileMutex.Unlock()
+	if lfc.File != nil {
+		err := lfc.File.Close()
+		lfc.File = nil
+		return err
+	}
+	return nil
+}
 
 func init() {
 	// Use %LOCALAPPDATA%\teams-green
@@ -103,12 +125,32 @@ func setupLogFile(cfg *Config) (io.Writer, error) {
 		}
 	}
 
+	logFileMutex.Lock()
+	defer logFileMutex.Unlock()
+
+	// Close existing log file if open
+	if logFile != nil {
+		logFile.Close()
+		logFile = nil
+	}
+
 	file, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
 
-	return file, nil
+	logFile = file
+	return &LogFileCloser{File: file}, nil
+}
+
+// CloseLogFile should be called during shutdown to properly close the log file
+func CloseLogFile() {
+	logFileMutex.Lock()
+	defer logFileMutex.Unlock()
+	if logFile != nil {
+		logFile.Close()
+		logFile = nil
+	}
 }
 
 func rotateLogIfNeeded(cfg *Config) error {
@@ -214,11 +256,7 @@ func (cfg *Config) Validate() error {
 		if cfg.Port > 65535 {
 			errors = append(errors, "port must be no more than 65535")
 		}
-
-		// Check if port is available
-		if err := checkPortAvailable(cfg.Port); err != nil {
-			errors = append(errors, fmt.Sprintf("port %d is not available: %v", cfg.Port, err))
-		}
+		// Remove redundant port availability check here - let WebSocket server handle it gracefully
 	}
 
 	// Validate log format

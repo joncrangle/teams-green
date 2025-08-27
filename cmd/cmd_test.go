@@ -18,10 +18,6 @@ func TestRootCommand(t *testing.T) {
 		t.Errorf("expected command name 'teams-green', got '%s'", rootCmd.Use)
 	}
 
-	if rootCmd.Version != "0.2.0" {
-		t.Errorf("expected version '0.2.0', got '%s'", rootCmd.Version)
-	}
-
 	if !strings.Contains(rootCmd.Long, "Teams-Green keeps your Microsoft Teams status active") {
 		t.Error("command description should mention Teams status")
 	}

@@ -213,6 +213,9 @@ func TestInitLoggerWithLogFile(t *testing.T) {
 		t.Errorf("log file should have been created")
 	}
 
+	// Explicitly close log file to prevent file locking issues on Windows
+	CloseLogFile()
+
 	// Force garbage collection to help close any open file handles
 	runtime.GC()
 	time.Sleep(10 * time.Millisecond)
@@ -235,6 +238,9 @@ func TestInitLoggerWithRotation(t *testing.T) {
 	if logger == nil {
 		t.Errorf("expected logger but got nil")
 	}
+
+	// Explicitly close log file to prevent file locking issues on Windows
+	CloseLogFile()
 
 	// Force garbage collection to help close any open file handles
 	runtime.GC()

@@ -6,13 +6,48 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/joncrangle/teams-green/internal/config"
 	"github.com/joncrangle/teams-green/internal/websocket"
+	"github.com/lxn/win"
 	ws "golang.org/x/net/websocket"
 )
+
+type TeamsWindow struct {
+	HWND           win.HWND
+	ProcessID      uint32
+	ExecutablePath string
+	WindowTitle    string
+	LastSeen       time.Time
+	IsValid        bool
+}
+
+type WindowCache struct {
+	Windows              []TeamsWindow
+	LastUpdate           time.Time
+	Mutex                sync.RWMutex
+	CacheDuration        time.Duration
+	LastFullScan         time.Time
+	QuickScanMode        bool
+	FailureCount         int
+	LastFailure          time.Time
+	AdaptiveScanInterval time.Duration
+}
+
+type RetryState struct {
+	FailureCount        int
+	LastFailure         time.Time
+	BackoffSeconds      int
+	MaxBackoff          int
+	TeamsRestartCount   int
+	LastTeamsRestart    time.Time
+	ConsecutiveFailures int
+	CircuitBreakerOpen  bool
+	CircuitOpenTime     time.Time
+}
 
 type Service struct {
 	logger   *slog.Logger
@@ -25,6 +60,7 @@ type TeamsManager struct {
 	windowCache *WindowCache
 	retryState  *RetryState
 	logger      *slog.Logger
+	enumContext *WindowEnumContext
 }
 
 func NewService(cfg *config.Config) *Service {
@@ -42,8 +78,13 @@ func NewService(cfg *config.Config) *Service {
 
 	teamsMgr := &TeamsManager{
 		windowCache: &WindowCache{
-			Windows:       make([]TeamsWindow, 0),
-			CacheDuration: 30 * time.Second,
+			Windows:              make([]TeamsWindow, 0),
+			CacheDuration:        30 * time.Second,
+			AdaptiveScanInterval: 5 * time.Minute,
+		},
+		enumContext: &WindowEnumContext{
+			teamsExecutables: teamsExecutables,
+			logger:           logger,
 		},
 		retryState: &RetryState{
 			MaxBackoff: 300, // 5 minutes max
@@ -172,6 +213,10 @@ func (s *Service) Run() error {
 	s.logger.Info("Shutting down service")
 	cancel()
 	s.SetState("stopped", s.config.WebSocket)
+
+	// Properly close log files
+	config.CloseLogFile()
+
 	time.Sleep(500 * time.Millisecond)
 	return nil
 }

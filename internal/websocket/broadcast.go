@@ -10,20 +10,11 @@ import (
 	"golang.org/x/net/websocket"
 )
 
-var (
-	bufferPool = sync.Pool{
-		New: func() interface{} {
-			return bytes.NewBuffer(make([]byte, 0, 512))
-		},
-	}
-	encoderPool = sync.Pool{
-		New: func() interface{} {
-			buf := bufferPool.Get().(*bytes.Buffer)
-			buf.Reset()
-			return json.NewEncoder(buf)
-		},
-	}
-)
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return bytes.NewBuffer(make([]byte, 0, 512))
+	},
+}
 
 func Broadcast(e *Event, state *ServiceState) {
 	state.Mutex.Lock()
@@ -31,16 +22,13 @@ func Broadcast(e *Event, state *ServiceState) {
 
 	e.Timestamp = time.Now()
 
-	// Get buffer and encoder from pool
+	// Get buffer from pool
 	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer bufferPool.Put(buf)
 
-	encoder := encoderPool.Get().(*json.Encoder)
-	defer encoderPool.Put(encoder)
-
-	// Reset encoder with the buffer
-	encoder = json.NewEncoder(buf)
+	// Create new encoder for this buffer (don't pool encoders)
+	encoder := json.NewEncoder(buf)
 
 	if err := encoder.Encode(e); err != nil {
 		state.Logger.Error("Error marshaling event", slog.String("error", err.Error()))
