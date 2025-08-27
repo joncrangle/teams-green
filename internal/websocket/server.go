@@ -12,11 +12,14 @@ import (
 )
 
 type ServiceState struct {
-	State   string
-	PID     int
-	Clients map[*websocket.Conn]bool
-	Mutex   sync.RWMutex
-	Logger  *slog.Logger
+	State            string
+	PID              int
+	Clients          map[*websocket.Conn]bool
+	Mutex            sync.RWMutex
+	Logger           *slog.Logger
+	LastActivity     time.Time
+	TeamsWindowCount int
+	FailureStreak    int
 }
 
 var server *http.Server

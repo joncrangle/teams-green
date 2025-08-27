@@ -15,9 +15,12 @@ import (
 )
 
 var serviceState = &websocket.ServiceState{
-	State:   "stopped",
-	PID:     os.Getpid(),
-	Clients: make(map[*ws.Conn]bool),
+	State:            "stopped",
+	PID:              os.Getpid(),
+	Clients:          make(map[*ws.Conn]bool),
+	LastActivity:     time.Now(),
+	TeamsWindowCount: 0,
+	FailureStreak:    0,
 }
 
 func SetState(newState string, emit bool) {
@@ -53,10 +56,15 @@ func MainLoop(ctx context.Context, loopTime time.Duration, wsEnabled bool) {
 		case <-ticker.C:
 			if err := SendKeysToTeams(); err != nil {
 				teamsMissingCount++
+				serviceState.Mutex.Lock()
+				serviceState.FailureStreak++
+				serviceState.Mutex.Unlock()
+
 				if teamsMissingCount <= maxMissingLogs {
 					serviceState.Logger.Warn("Teams activity failed",
 						slog.String("error", err.Error()),
-						slog.Int("missing_count", teamsMissingCount))
+						slog.Int("missing_count", teamsMissingCount),
+						slog.Int("failure_streak", serviceState.FailureStreak))
 					if wsEnabled {
 						websocket.Broadcast(&websocket.Event{
 							Service: "teams-green",
@@ -67,18 +75,25 @@ func MainLoop(ctx context.Context, loopTime time.Duration, wsEnabled bool) {
 					}
 				}
 			} else {
-				if teamsMissingCount > 0 {
+				// Success - update activity tracking
+				serviceState.Mutex.Lock()
+				serviceState.LastActivity = time.Now()
+				serviceState.TeamsWindowCount = len(FindTeamsWindows())
+				if serviceState.FailureStreak > 0 {
 					serviceState.Logger.Info("Teams activity resumed",
-						slog.Int("was_missing_count", teamsMissingCount))
+						slog.Int("was_failure_streak", serviceState.FailureStreak),
+						slog.Int("teams_windows", serviceState.TeamsWindowCount))
 					if wsEnabled {
 						websocket.Broadcast(&websocket.Event{
 							Service: "teams-green",
 							Status:  "running",
 							PID:     serviceState.PID,
-							Message: "Teams activity resumed",
+							Message: fmt.Sprintf("Teams activity resumed (found %d windows)", serviceState.TeamsWindowCount),
 						}, serviceState)
 					}
 				}
+				serviceState.FailureStreak = 0
+				serviceState.Mutex.Unlock()
 				teamsMissingCount = 0
 			}
 		case <-ctx.Done():
@@ -89,7 +104,7 @@ func MainLoop(ctx context.Context, loopTime time.Duration, wsEnabled bool) {
 }
 
 func Run(cfg *config.Config) error {
-	serviceState.Logger = config.InitLogger(cfg.Debug)
+	serviceState.Logger = config.InitLogger(cfg)
 
 	// Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())

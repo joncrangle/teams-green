@@ -67,8 +67,14 @@ teams-green start --debug
 # Start with WebSocket server
 teams-green start --websocket --port 8765
 
+# Enable logging to file with rotation
+teams-green start --log-file logs/teams-green.log --log-rotate
+
+# Use JSON logging format
+teams-green start --log-format json --log-file logs/teams-green.log
+
 # Combine options
-teams-green start --debug --websocket --interval 60
+teams-green start --debug --websocket --interval 60 --log-file logs/debug.log
 ```
 
 ### WebSocket API
@@ -95,6 +101,11 @@ The service accepts the following flags:
 | `--interval` | `-i` | `180` | Activity interval in seconds |
 | `--websocket` | `-w` | `false` | Enable WebSocket server |
 | `--port` | `-p` | `8765` | WebSocket server port |
+| `--log-format` | | `text` | Log format: text or json |
+| `--log-file` | | `` | Log file path (empty = no file logging) |
+| `--log-rotate` | | `false` | Enable log rotation |
+| `--max-log-size` | | `10` | Maximum log file size in MB |
+| `--max-log-age` | | `30` | Maximum log file age in days |
 
 ## Development
 

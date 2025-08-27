@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/joncrangle/teams-green/internal/config"
 
@@ -57,6 +58,15 @@ func Start(cfg *config.Config) error {
 	if cfg.Debug {
 		args = append(args, "--debug")
 	}
+	if cfg.LogFile != "" {
+		args = append(args, fmt.Sprintf("--log-file=%s", cfg.LogFile))
+	}
+	if cfg.LogFormat != "" {
+		args = append(args, fmt.Sprintf("--log-format=%s", cfg.LogFormat))
+	}
+	if cfg.LogRotate {
+		args = append(args, "--log-rotate")
+	}
 
 	if cfg.Debug {
 		// Run in foreground for debugging
@@ -77,7 +87,11 @@ func Start(cfg *config.Config) error {
 		return fmt.Errorf("failed to start service: %v", err)
 	}
 
-	if err := os.WriteFile(config.PidFile, fmt.Appendf(nil, "%d", cmd.Process.Pid), 0o644); err != nil {
+	pidContent := fmt.Sprintf("%d", cmd.Process.Pid)
+	if err := os.WriteFile(config.PidFile, []byte(pidContent), 0o644); err != nil {
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			return fmt.Errorf("service started but failed to write PID file (%v) and failed to cleanup process (%v)", err, killErr)
+		}
 		return fmt.Errorf("service started but failed to write PID file: %v", err)
 	}
 
@@ -88,45 +102,83 @@ func Start(cfg *config.Config) error {
 func Stop() error {
 	pidBytes, err := os.ReadFile(config.PidFile)
 	if err != nil {
-		return fmt.Errorf("service not running (no PID file)")
+		if os.IsNotExist(err) {
+			return fmt.Errorf("service not running (no PID file found)")
+		}
+		return fmt.Errorf("failed to read PID file: %v", err)
 	}
 
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 	if err != nil {
-		os.Remove(config.PidFile)
+		if removeErr := os.Remove(config.PidFile); removeErr != nil {
+			return fmt.Errorf("invalid PID file (%v) and failed to cleanup (%v)", err, removeErr)
+		}
 		return fmt.Errorf("invalid PID file: %v", err)
+	}
+
+	if !IsProcessRunning(pid) {
+		if removeErr := os.Remove(config.PidFile); removeErr != nil {
+			return fmt.Errorf("process not running and failed to cleanup stale PID file: %v", removeErr)
+		}
+		return fmt.Errorf("process not running (cleaned up stale PID file)")
 	}
 
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		os.Remove(config.PidFile)
+		if removeErr := os.Remove(config.PidFile); removeErr != nil {
+			return fmt.Errorf("process not found (%v) and failed to cleanup PID file (%v)", err, removeErr)
+		}
 		return fmt.Errorf("process not found: %v", err)
 	}
 
 	if err := proc.Kill(); err != nil {
-		return fmt.Errorf("error stopping process: %v", err)
+		return fmt.Errorf("failed to stop process (PID %d): %v", pid, err)
 	}
 
-	os.Remove(config.PidFile)
-	fmt.Printf("✅ Service stopped (PID %d)\n", pid)
+	if err := os.Remove(config.PidFile); err != nil {
+		fmt.Printf("⚠️  Service stopped (PID %d) but failed to cleanup PID file: %v\n", pid, err)
+	} else {
+		fmt.Printf("✅ Service stopped (PID %d)\n", pid)
+	}
 	return nil
 }
 
-func GetStatus() (bool, int, error) {
+func GetEnhancedStatus() (bool, int, *StatusInfo, error) {
 	pidBytes, err := os.ReadFile(config.PidFile)
 	if err != nil {
-		return false, 0, nil // Not running
+		if os.IsNotExist(err) {
+			return false, 0, nil, nil // Not running, no error
+		}
+		return false, 0, nil, fmt.Errorf("failed to read PID file: %v", err)
 	}
 
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 	if err != nil {
-		os.Remove(config.PidFile)
-		return false, 0, fmt.Errorf("invalid PID file")
+		if removeErr := os.Remove(config.PidFile); removeErr != nil {
+			return false, 0, nil, fmt.Errorf("invalid PID file (%v) and failed to cleanup (%v)", err, removeErr)
+		}
+		return false, 0, nil, fmt.Errorf("invalid PID file (cleaned up): %v", err)
 	}
 
 	if IsProcessRunning(pid) {
-		return true, pid, nil
+		// Try to read service state if available (this is a simplified approach)
+		info := &StatusInfo{
+			LastActivity:     time.Now(), // Default to now if we can't get actual info
+			TeamsWindowCount: len(FindTeamsWindows()),
+			FailureStreak:    0, // Can't get this from external process
+		}
+		return true, pid, info, nil
 	}
-	os.Remove(config.PidFile)
-	return false, pid, nil // Stale PID
+
+	// Process not running, clean up stale PID file
+	if removeErr := os.Remove(config.PidFile); removeErr != nil {
+		return false, pid, nil, fmt.Errorf("stale PID file found but failed to cleanup: %v", removeErr)
+	}
+	return false, pid, nil, nil // Stale PID cleaned up
+}
+
+type StatusInfo struct {
+	LastActivity     time.Time
+	TeamsWindowCount int
+	FailureStreak    int
 }
