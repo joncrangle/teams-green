@@ -18,7 +18,7 @@ var rootCmd = &cobra.Command{
 	Short: "Keep Microsoft Teams status active",
 	Long: `Teams Green Service keeps your Microsoft Teams status active by sending 
 periodic key combinations to prevent the status from going idle.`,
-	Version: "1.0.0",
+	Version: "0.1.1",
 }
 
 var startCmd = &cobra.Command{
