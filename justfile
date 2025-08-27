@@ -18,7 +18,7 @@ clean:
     go clean
 
 fmt:
-    go fmt ./...
+    golangci-lint fmt
 
 lint:
     golangci-lint run

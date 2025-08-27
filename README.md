@@ -4,7 +4,7 @@ Keep that Teams green.
 
 ## Overview
 
-Teams-Green runs in the background and periodically sends key combinations (Shift+F15) to keep your Teams status from going idle. It includes optional WebSocket support for real-time status monitoring and control.
+Teams-Green runs in the background and periodically sends a key (F15) to keep your Teams status from going idle. It includes optional WebSocket support for real-time status monitoring and control.
 
 ## Features
 
@@ -129,7 +129,7 @@ Teams-Green works by:
 
 1. **Process Detection**: Locates running Microsoft Teams processes
 2. **Window Targeting**: Finds and focuses Teams windows when needed
-3. **Key Simulation**: Sends key combinations (Shift+F15) that doesn't disrupt usage
+3. **Key Simulation**: Sends keys (F15) that doesn't disrupt usage
 4. **Background Operation**: Runs as a detached process with PID file management
 5. **Status Monitoring**: Tracks service state and provides real-time feedback
 

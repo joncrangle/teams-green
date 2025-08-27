@@ -100,7 +100,7 @@ func SendKeysToTeams() error {
 	currentWindow, _, _ := procGetForegroundWindow.Call()
 
 	const (
-		vkF15            = 0x41 // F15 key
+		vkF15            = 0x7E // F15 key
 		keyeventfKeydown = 0
 		keyeventfKeyup   = 2
 		swHide           = 0
