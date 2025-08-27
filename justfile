@@ -23,6 +23,9 @@ fmt:
 lint:
     golangci-lint run
 
+fix:
+    golangci-lint run --fix
+
 tidy:
     go mod tidy
 
