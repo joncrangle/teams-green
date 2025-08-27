@@ -4,6 +4,9 @@ default:
 build:
     go build -ldflags="-s -w" -o dist/teams-green.exe .
 
+test:
+    go test -v ./...
+
 run: build
     ./dist/teams-green.exe start
 

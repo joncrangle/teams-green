@@ -1,6 +1,9 @@
-name: golangci-lint
+name: ci
+
 on:
   push:
+    tags-ignore:
+      - "v*"
   pull_request:
 
 permissions:
@@ -23,3 +26,18 @@ jobs:
         uses: golangci/golangci-lint-action@v8
         with:
           version: latest
+
+  test:
+    name: test
+    runs-on: windows-latest
+    steps:
+      - name: Configure git line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Run tests
+        run: go test -v ./...
