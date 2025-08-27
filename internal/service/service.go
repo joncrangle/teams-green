@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -35,8 +36,11 @@ type WindowCache struct {
 	FailureCount         int
 	LastFailure          time.Time
 	AdaptiveScanInterval time.Duration
-	SystemBootTime       time.Time // Track system boot time to detect hibernation/sleep
-	LastCacheCheck       time.Time // Track when cache was last validated
+	SystemBootTime       time.Time         // Track system boot time to detect hibernation/sleep
+	LastCacheCheck       time.Time         // Track when cache was last validated
+	BloomFilter          []uint64          // Simple bloom filter for PID tracking
+	BloomSize            int               // Size of bloom filter
+	ProcessHashes        map[uint32]uint64 // Process ID -> hash mapping
 }
 
 type RetryState struct {
@@ -85,6 +89,9 @@ func NewService(cfg *config.Config) *Service {
 			AdaptiveScanInterval: 5 * time.Minute,
 			SystemBootTime:       time.Now(), // Initialize with current time
 			LastCacheCheck:       time.Now(),
+			BloomSize:            256,                // 2KB bloom filter
+			BloomFilter:          make([]uint64, 32), // 256 bits / 8 bits per uint64 = 32
+			ProcessHashes:        make(map[uint32]uint64),
 		},
 		enumContext: &WindowEnumContext{
 			teamsExecutables: getTeamsExecutables(),
@@ -131,13 +138,38 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 	teamsMissingCount := 0
 	const maxMissingLogs = 3
 
+	// Health check tracking
+	var lastHealthCheck time.Time
+	const healthCheckInterval = 5 * time.Minute
+
+	// Panic recovery for main loop
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("Main loop panic recovered", slog.Any("error", r))
+			// Attempt to restart the loop after a delay
+			time.Sleep(10 * time.Second)
+			if ctx.Err() == nil { // Only restart if context is still valid
+				s.logger.Info("Attempting to restart main loop after panic")
+				go s.MainLoop(ctx, loopTime)
+			}
+		}
+	}()
+
 	s.logger.Info("Main loop started",
 		slog.Duration("interval", loopTime))
 
 	for {
 		select {
 		case <-ticker.C:
-			if err := s.teamsMgr.SendKeysToTeams(s.state); err != nil {
+			// Periodic health check
+			now := time.Now()
+			if now.Sub(lastHealthCheck) >= healthCheckInterval {
+				s.performHealthCheck()
+				lastHealthCheck = now
+			}
+
+			// Attempt Teams activity with error recovery
+			if err := s.safeTeamsActivity(); err != nil {
 				teamsMissingCount++
 				s.state.Mutex.Lock()
 				s.state.FailureStreak++
@@ -156,6 +188,13 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 							Message: err.Error(),
 						}, s.state)
 					}
+				}
+
+				// Implement exponential backoff for excessive failures
+				if s.state.FailureStreak > 10 {
+					backoffDuration := time.Duration(min(s.state.FailureStreak*2, 60)) * time.Second
+					s.logger.Info("Applying failure backoff", slog.Duration("duration", backoffDuration))
+					time.Sleep(backoffDuration)
 				}
 			} else {
 				// Success - update activity tracking
@@ -183,6 +222,56 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 			s.logger.Info("Main loop stopping")
 			return
 		}
+	}
+}
+
+func (s *Service) safeTeamsActivity() (err error) {
+	// Panic recovery for Teams activity
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("Teams activity panic recovered", slog.Any("error", r))
+			err = fmt.Errorf("teams activity panic: %v", r)
+		}
+	}()
+
+	return s.teamsMgr.SendKeysToTeams(s.state)
+}
+
+func (s *Service) performHealthCheck() {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("Health check panic recovered", slog.Any("error", r))
+		}
+	}()
+
+	s.logger.Debug("Performing health check")
+
+	// Check memory usage (basic check)
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	if memStats.Alloc > 100*1024*1024 { // 100MB threshold
+		s.logger.Warn("High memory usage detected",
+			slog.Uint64("alloc_mb", memStats.Alloc/1024/1024))
+		runtime.GC() // Force garbage collection
+	}
+
+	// Check goroutine count
+	goroutineCount := runtime.NumGoroutine()
+	if goroutineCount > 50 {
+		s.logger.Warn("High goroutine count", slog.Int("count", goroutineCount))
+	}
+
+	// Check WebSocket connections if enabled
+	if s.config.WebSocket {
+		s.state.Mutex.RLock()
+		clientCount := len(s.state.Clients)
+		s.state.Mutex.RUnlock()
+
+		s.logger.Debug("Health check completed",
+			slog.Uint64("memory_mb", memStats.Alloc/1024/1024),
+			slog.Int("goroutines", goroutineCount),
+			slog.Int("websocket_clients", clientCount))
 	}
 }
 

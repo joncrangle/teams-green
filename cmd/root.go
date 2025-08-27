@@ -51,7 +51,7 @@ var startCmd = &cobra.Command{
 
 		if !cfg.Debug {
 			if cfg.WebSocket {
-				fmt.Printf("🌐 WebSocket server available at: ws://127.0.0.1:%d/ws\n", cfg.Port)
+				fmt.Printf("🌐 WebSocket server available at: ws://127.0.0.1:%d\n", cfg.Port)
 			}
 			fmt.Println("✅ Service started successfully")
 		}
@@ -134,7 +134,7 @@ var toggleCmd = &cobra.Command{
 
 		if !cfg.Debug {
 			if cfg.WebSocket {
-				fmt.Printf("🌐 WebSocket server available at: ws://127.0.0.1:%d/ws\n", cfg.Port)
+				fmt.Printf("🌐 WebSocket server available at: ws://127.0.0.1:%d\n", cfg.Port)
 			}
 			fmt.Println("✅ Teams-Green started successfully")
 		}

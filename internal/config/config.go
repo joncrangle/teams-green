@@ -270,7 +270,7 @@ func (cfg *Config) Validate() error {
 		errors = append(errors, "interval must be no more than 3600 seconds (1 hour)")
 	}
 
-	// Validate port
+	// Validate port with additional security checks
 	if cfg.WebSocket {
 		if cfg.Port < 1024 {
 			errors = append(errors, "port must be at least 1024")
@@ -278,22 +278,39 @@ func (cfg *Config) Validate() error {
 		if cfg.Port > 65535 {
 			errors = append(errors, "port must be no more than 65535")
 		}
-		// Remove redundant port availability check here - let WebSocket server handle it gracefully
+		// Security: Warn about commonly used ports that might conflict
+		commonPorts := []int{80, 443, 8080, 8443, 3000, 3001, 5000, 5001}
+		for _, port := range commonPorts {
+			if cfg.Port == port {
+				fmt.Printf("⚠️  Warning: Port %d is commonly used and may conflict with other services\n", port)
+				break
+			}
+		}
 	}
 
-	// Validate log format
+	// Validate log format with additional security
 	if cfg.LogFormat != "" && cfg.LogFormat != "text" && cfg.LogFormat != "json" {
 		errors = append(errors, "log format must be 'text' or 'json'")
 	}
 
-	// Validate log file path
+	// Validate log file path with security checks
 	if cfg.LogFile != "" {
 		if !filepath.IsAbs(cfg.LogFile) {
 			errors = append(errors, "log file path must be absolute")
 		}
 
-		// Check if directory exists or can be created
+		// Security: Prevent path traversal attacks
+		if strings.Contains(cfg.LogFile, "..") {
+			errors = append(errors, "log file path cannot contain '..' (path traversal protection)")
+		}
+
+		// Security: Ensure log file is in safe directory
 		logDir := filepath.Dir(cfg.LogFile)
+		if err := validateLogDirectory(logDir); err != nil {
+			errors = append(errors, fmt.Sprintf("log directory validation failed: %v", err))
+		}
+
+		// Check if directory exists or can be created
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
 			errors = append(errors, fmt.Sprintf("cannot create log directory: %v", err))
 		}
@@ -320,6 +337,31 @@ func (cfg *Config) Validate() error {
 
 	if len(errors) > 0 {
 		return fmt.Errorf("configuration validation failed:\n  - %s", strings.Join(errors, "\n  - "))
+	}
+
+	return nil
+}
+
+func validateLogDirectory(logDir string) error {
+	// Security: Prevent logging to system directories
+	systemDirs := []string{
+		"C:\\Windows", "C:\\System32", "C:\\Program Files", "C:\\Program Files (x86)",
+		"/etc", "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/boot", "/sys", "/proc",
+	}
+
+	logDirLower := strings.ToLower(logDir)
+	for _, sysDir := range systemDirs {
+		sysDirLower := strings.ToLower(sysDir)
+		if strings.HasPrefix(logDirLower, sysDirLower) {
+			return fmt.Errorf("cannot write logs to system directory: %s", logDir)
+		}
+	}
+
+	// Security: Ensure directory is not a symlink to a sensitive location
+	if info, err := os.Lstat(logDir); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("log directory cannot be a symbolic link: %s", logDir)
+		}
 	}
 
 	return nil
