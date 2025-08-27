@@ -23,7 +23,7 @@ builds:
 
 archives:
   - id: windows-zip
-    builds:
+    ids:
       - teams-green
     formats: ["zip"]
     name_template: >-
