@@ -128,7 +128,6 @@ teams-green/
 ├── internal/
 │   ├── config/         # Configuration and logging setup
 │   ├── service/        # Core service logic and Windows integration
-│   ├── types/          # Shared types and data structures
 │   └── websocket/      # WebSocket server and broadcasting
 ├── .goreleaser.yaml    # Release configuration
 └── main.go             # Application entry point

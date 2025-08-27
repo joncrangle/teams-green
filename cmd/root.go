@@ -15,17 +15,32 @@ var cfg = &config.Config{}
 
 var rootCmd = &cobra.Command{
 	Use:   "teams-green",
-	Short: "Keep Microsoft Teams status active",
-	Long: `Teams Green Service keeps your Microsoft Teams status active by sending 
-periodic key combinations to prevent the status from going idle.`,
-	Version: "0.1.1",
+	Short: "Keep that Teams status green",
+	Long: `Teams-Green keeps your Microsoft Teams status active by sending 
+periodic keys to prevent the status from going idle.`,
+	Version: "0.2.0",
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Show version information",
+	Long:  "Display version information for teams-green",
+	Run: func(_ *cobra.Command, _ []string) {
+		fmt.Printf("teams-green version %s\n", rootCmd.Version)
+		fmt.Println("Keep that Teams green")
+		fmt.Println("https://github.com/joncrangle/teams-green")
+	},
 }
 
 var startCmd = &cobra.Command{
 	Use:   "start",
-	Short: "Start the Teams Green service",
-	Long:  "Start the Teams Green service in the background to keep Teams status active",
+	Short: "Start Teams-Green",
+	Long:  "Start Teams-Green in the background to keep Teams status active",
 	RunE: func(_ *cobra.Command, _ []string) error {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+
 		if cfg.Debug {
 			fmt.Println("🔧 Starting service in debug mode (foreground)")
 		}
@@ -46,8 +61,8 @@ var startCmd = &cobra.Command{
 
 var stopCmd = &cobra.Command{
 	Use:   "stop",
-	Short: "Stop the Teams Green service",
-	Long:  "Stop the running Teams Green service",
+	Short: "Stop Teams-Green process",
+	Long:  "Stop the running Teams-Green process",
 	RunE: func(_ *cobra.Command, _ []string) error {
 		if err := service.Stop(); err != nil {
 			return fmt.Errorf("❌ %v", err)
@@ -58,8 +73,8 @@ var stopCmd = &cobra.Command{
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Check the status of the Teams Green service",
-	Long:  "Display the current status of the Teams Green service with detailed activity information",
+	Short: "Check the status of Teams-Green",
+	Long:  "Display the current status of Teams-Green with detailed activity information",
 	RunE: func(_ *cobra.Command, _ []string) error {
 		running, pid, info, err := service.GetEnhancedStatus()
 		if err != nil {
@@ -93,8 +108,8 @@ var statusCmd = &cobra.Command{
 
 var toggleCmd = &cobra.Command{
 	Use:   "toggle",
-	Short: "Toggle the Teams Green service",
-	Long:  "Start the service if it's not running, or stop it if it's currently running",
+	Short: "Toggle Teams-Green",
+	Long:  "Start Teams-Green if it's not running, or stop it if it's currently running",
 	RunE: func(_ *cobra.Command, _ []string) error {
 		running, _, _, err := service.GetEnhancedStatus()
 		if err != nil {
@@ -104,8 +119,13 @@ var toggleCmd = &cobra.Command{
 		if running {
 			return service.Stop()
 		}
+
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+
 		if cfg.Debug {
-			fmt.Println("🔧 Starting service in debug mode (foreground)")
+			fmt.Println("🔧 Starting Teams-Green in debug mode (foreground)")
 		}
 
 		if err := service.Start(cfg); err != nil {
@@ -116,7 +136,7 @@ var toggleCmd = &cobra.Command{
 			if cfg.WebSocket {
 				fmt.Printf("🌐 WebSocket server available at: ws://127.0.0.1:%d/ws\n", cfg.Port)
 			}
-			fmt.Println("✅ Service started successfully")
+			fmt.Println("✅ Teams-Green started successfully")
 		}
 		return nil
 	},
@@ -124,10 +144,11 @@ var toggleCmd = &cobra.Command{
 
 var runCmd = &cobra.Command{
 	Use:    "run",
-	Short:  "Internal command to run the service",
+	Short:  "Internal command to run Teams-Green",
 	Hidden: true,
 	RunE: func(_ *cobra.Command, _ []string) error {
-		return service.Run(cfg)
+		svc := service.NewService(cfg)
+		return svc.Run()
 	},
 }
 
@@ -169,6 +190,7 @@ func init() {
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(toggleCmd)
+	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(runCmd)
 }
 

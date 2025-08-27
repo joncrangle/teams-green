@@ -12,6 +12,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/joncrangle/teams-green/internal/websocket"
 	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -46,23 +47,21 @@ type WindowCache struct {
 	LastUpdate    time.Time
 	Mutex         sync.RWMutex
 	CacheDuration time.Duration
+	LastFullScan  time.Time
+	QuickScanMode bool
 }
 
 type RetryState struct {
-	FailureCount   int
-	LastFailure    time.Time
-	BackoffSeconds int
-	MaxBackoff     int
+	FailureCount        int
+	LastFailure         time.Time
+	BackoffSeconds      int
+	MaxBackoff          int
+	TeamsRestartCount   int
+	LastTeamsRestart    time.Time
+	ConsecutiveFailures int
 }
 
 var (
-	windowCache = &WindowCache{
-		Windows:       make([]TeamsWindow, 0),
-		CacheDuration: 30 * time.Second,
-	}
-	retryState = &RetryState{
-		MaxBackoff: 300, // 5 minutes max
-	}
 	teamsExecutables []string
 	currentHwnds     *[]win.HWND
 )
@@ -192,7 +191,10 @@ func enumWindowsProc(hwnd syscall.Handle, _ uintptr) uintptr {
 	}
 	defer func() {
 		if err := windows.CloseHandle(hProcess); err != nil {
-			slog.Debug("Failed to close process handle", slog.String("error", err.Error()))
+			slog.Debug("Failed to close process handle",
+				slog.String("error", err.Error()),
+				slog.Uint64("pid", uint64(pid)),
+				slog.Uint64("handle", uint64(uintptr(hProcess))))
 		}
 	}()
 
@@ -216,30 +218,9 @@ func enumWindowsProc(hwnd syscall.Handle, _ uintptr) uintptr {
 	return 1
 }
 
-func validateCachedWindows() []TeamsWindow {
-	windowCache.Mutex.Lock()
-	defer windowCache.Mutex.Unlock()
-
-	var validWindows []TeamsWindow
-	for _, window := range windowCache.Windows {
-		// Check if window still exists and is visible
-		if ret, _, _ := procIsWindowVisible.Call(uintptr(window.HWND)); ret != 0 {
-			// Check if process is still running
-			if IsProcessRunning(int(window.ProcessID)) {
-				window.LastSeen = time.Now()
-				window.IsValid = true
-				validWindows = append(validWindows, window)
-			}
-		}
-	}
-
-	windowCache.Windows = validWindows
-	return validWindows
-}
-
-func updateWindowCache(hwnds []win.HWND) {
-	windowCache.Mutex.Lock()
-	defer windowCache.Mutex.Unlock()
+func (tm *TeamsManager) updateWindowCache(hwnds []win.HWND) {
+	tm.windowCache.Mutex.Lock()
+	defer tm.windowCache.Mutex.Unlock()
 
 	now := time.Now()
 	var newWindows []TeamsWindow
@@ -259,7 +240,12 @@ func updateWindowCache(hwnds []win.HWND) {
 		if err := windows.QueryFullProcessImageName(hProcess, 0, &exeName[0], &size); err == nil {
 			executablePath = windows.UTF16ToString(exeName[:size])
 		}
-		_ = windows.CloseHandle(hProcess)
+		if err := windows.CloseHandle(hProcess); err != nil {
+			slog.Debug("Failed to close process handle during cache update",
+				slog.String("error", err.Error()),
+				slog.Uint64("pid", uint64(pid)),
+				slog.Uint64("handle", uint64(uintptr(hProcess))))
+		}
 
 		windowTitle := getWindowTitle(hwnd)
 
@@ -275,76 +261,106 @@ func updateWindowCache(hwnds []win.HWND) {
 		newWindows = append(newWindows, window)
 	}
 
-	windowCache.Windows = newWindows
-	windowCache.LastUpdate = now
+	tm.windowCache.Windows = newWindows
+	tm.windowCache.LastUpdate = now
 }
 
-func FindTeamsWindows() []win.HWND {
-	windowCache.Mutex.RLock()
-	cacheValid := time.Since(windowCache.LastUpdate) < windowCache.CacheDuration
-	windowCache.Mutex.RUnlock()
+func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
+	tm.windowCache.Mutex.RLock()
+	cacheValid := time.Since(tm.windowCache.LastUpdate) < tm.windowCache.CacheDuration
+	needsFullScan := time.Since(tm.windowCache.LastFullScan) > 5*time.Minute || len(tm.windowCache.Windows) == 0
+	tm.windowCache.Mutex.RUnlock()
 
-	if cacheValid {
-		validWindows := validateCachedWindows()
+	// If cache is valid and we have windows, try quick validation first
+	if cacheValid && !needsFullScan {
+		validWindows := tm.quickValidateWindows()
 		if len(validWindows) > 0 {
-			hwnds := make([]win.HWND, len(validWindows))
-			for i, window := range validWindows {
-				hwnds[i] = window.HWND
-			}
-			return hwnds
+			return validWindows
 		}
 	}
 
-	// Cache miss or invalid, enumerate windows
+	// Fallback to full enumeration
+	return tm.performFullWindowScan(needsFullScan)
+}
+
+func (tm *TeamsManager) quickValidateWindows() []win.HWND {
+	tm.windowCache.Mutex.Lock()
+	defer tm.windowCache.Mutex.Unlock()
+
+	var validHwnds []win.HWND
+	var validWindows []TeamsWindow
+
+	for _, window := range tm.windowCache.Windows {
+		// Quick check if window still exists and is visible
+		if ret, _, _ := procIsWindowVisible.Call(uintptr(window.HWND)); ret != 0 {
+			// Verify process is still running (lightweight check)
+			if IsProcessRunning(int(window.ProcessID)) {
+				window.LastSeen = time.Now()
+				window.IsValid = true
+				validWindows = append(validWindows, window)
+				validHwnds = append(validHwnds, window.HWND)
+			}
+		}
+	}
+
+	if len(validWindows) > 0 {
+		tm.windowCache.Windows = validWindows
+		tm.windowCache.LastUpdate = time.Now()
+		tm.logger.Debug("Quick window validation successful",
+			slog.Int("window_count", len(validWindows)))
+	}
+
+	return validHwnds
+}
+
+func (tm *TeamsManager) performFullWindowScan(isFullScan bool) []win.HWND {
 	var hwnds []win.HWND
 	currentHwnds = &hwnds
 
+	tm.logger.Debug("Performing window enumeration",
+		slog.Bool("full_scan", isFullScan))
+
+	startTime := time.Now()
 	ret, _, err := procEnumWindows.Call(
 		syscall.NewCallback(enumWindowsProc),
 		0,
 	)
+	scanDuration := time.Since(startTime)
+
 	if ret == 0 {
 		slog.Debug("EnumWindows failed", slog.String("error", err.Error()))
 	}
 
+	tm.logger.Debug("Window enumeration completed",
+		slog.Int("window_count", len(hwnds)),
+		slog.Duration("scan_time", scanDuration))
+
 	// Update cache with new results
-	updateWindowCache(hwnds)
+	tm.updateWindowCache(hwnds)
+
+	tm.windowCache.Mutex.Lock()
+	if isFullScan {
+		tm.windowCache.LastFullScan = time.Now()
+	}
+	tm.windowCache.Mutex.Unlock()
 
 	return hwnds
 }
 
-func SendKeysToTeams() error {
-	hwnds := FindTeamsWindows()
+func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
+	hwnds := tm.FindTeamsWindows()
 	if len(hwnds) == 0 {
-		// Handle retry logic with exponential backoff
-		now := time.Now()
-		if retryState.FailureCount == 0 {
-			retryState.LastFailure = now
-		}
-
-		retryState.FailureCount++
-
-		// Calculate backoff (exponential up to max)
-		backoff := min(30*(1<<uint(retryState.FailureCount-1)), retryState.MaxBackoff)
-		retryState.BackoffSeconds = backoff
-
-		if time.Since(retryState.LastFailure) < time.Duration(backoff)*time.Second {
-			// Still in backoff period, return cached error without logging
-			return fmt.Errorf("no Teams windows found (backoff: %ds remaining)",
-				backoff-int(time.Since(retryState.LastFailure).Seconds()))
-		}
-
-		retryState.LastFailure = now
-		return fmt.Errorf("no Teams windows found (attempt %d, next retry in %ds)",
-			retryState.FailureCount, backoff)
+		return tm.handleTeamsNotFound(state)
 	}
 
 	// Reset retry state on success
-	if retryState.FailureCount > 0 {
-		serviceState.Logger.Info("Teams windows found after failures",
-			slog.Int("failure_count", retryState.FailureCount))
-		retryState.FailureCount = 0
-		retryState.BackoffSeconds = 0
+	if tm.retryState.FailureCount > 0 {
+		tm.logger.Info("Teams windows found after failures",
+			slog.Int("failure_count", tm.retryState.FailureCount),
+			slog.Int("consecutive_failures", tm.retryState.ConsecutiveFailures))
+		tm.retryState.FailureCount = 0
+		tm.retryState.BackoffSeconds = 0
+		tm.retryState.ConsecutiveFailures = 0
 	}
 
 	// Store the currently focused window to restore it later
@@ -442,7 +458,7 @@ func SendKeysToTeams() error {
 	}
 
 	if successCount > 0 {
-		serviceState.Logger.Debug("Sent keys to Teams windows",
+		tm.logger.Debug("Sent keys to Teams windows",
 			slog.String("keys", "F15"),
 			slog.Int("window_count", successCount),
 			slog.Int("total_windows", len(hwnds)))
@@ -453,6 +469,133 @@ func SendKeysToTeams() error {
 		return fmt.Errorf("failed to send keys to any Teams window: %v", lastError)
 	}
 	return fmt.Errorf("failed to send keys to any Teams window")
+}
+
+func (tm *TeamsManager) handleTeamsNotFound(_ *websocket.ServiceState) error {
+	// Handle retry logic with exponential backoff
+	now := time.Now()
+	if tm.retryState.FailureCount == 0 {
+		tm.retryState.LastFailure = now
+	}
+
+	tm.retryState.FailureCount++
+	tm.retryState.ConsecutiveFailures++
+
+	// Check if we should attempt Teams process restart detection
+	if tm.retryState.ConsecutiveFailures >= 10 &&
+		time.Since(tm.retryState.LastTeamsRestart) > 5*time.Minute {
+
+		// Check if Teams processes still exist
+		if teamsProcesses := getRunningTeamsProcesses(); len(teamsProcesses) == 0 {
+			tm.logger.Warn("No Teams processes found, Teams may have been closed")
+
+			// Try to detect if Teams is starting up
+			go tm.monitorTeamsStartup()
+
+			tm.retryState.TeamsRestartCount++
+			tm.retryState.LastTeamsRestart = now
+
+			return fmt.Errorf("teams not running (restart attempt %d)", tm.retryState.TeamsRestartCount)
+		}
+	}
+
+	// Calculate backoff (exponential up to max)
+	backoff := min(30*(1<<uint(tm.retryState.FailureCount-1)), tm.retryState.MaxBackoff)
+	tm.retryState.BackoffSeconds = backoff
+
+	if time.Since(tm.retryState.LastFailure) < time.Duration(backoff)*time.Second {
+		// Still in backoff period, return cached error without logging
+		return fmt.Errorf("no Teams windows found (backoff: %ds remaining, consecutive failures: %d)",
+			backoff-int(time.Since(tm.retryState.LastFailure).Seconds()),
+			tm.retryState.ConsecutiveFailures)
+	}
+
+	tm.retryState.LastFailure = now
+	return fmt.Errorf("no Teams windows found (attempt %d, next retry in %ds, consecutive: %d)",
+		tm.retryState.FailureCount, backoff, tm.retryState.ConsecutiveFailures)
+}
+
+func getRunningTeamsProcesses() []uint32 {
+	var processes []uint32
+	var hwnds []win.HWND
+	currentHwnds = &hwnds
+
+	_, _, err := procEnumWindows.Call(
+		syscall.NewCallback(func(hwnd syscall.Handle, _ uintptr) uintptr {
+			var pid uint32
+			_, _, _ = procGetWindowThreadProcessID.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&pid)))
+
+			hProcess, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+			if err != nil || hProcess == 0 {
+				return 1
+			}
+			defer func() {
+				if err := windows.CloseHandle(hProcess); err != nil {
+					slog.Debug("Failed to close process handle in getRunningTeamsProcesses",
+						slog.String("error", err.Error()),
+						slog.Uint64("pid", uint64(pid)))
+				}
+			}()
+
+			var exeName [windows.MAX_PATH]uint16
+			size := uint32(len(exeName))
+			if err := windows.QueryFullProcessImageName(hProcess, 0, &exeName[0], &size); err != nil {
+				return 1
+			}
+
+			exe := strings.ToLower(windows.UTF16ToString(exeName[:size]))
+			exeBase := filepath.Base(exe)
+
+			if slices.Contains(teamsExecutables, exeBase) {
+				// Check if PID is already in the list
+				for _, existingPID := range processes {
+					if existingPID == pid {
+						return 1 // Already added
+					}
+				}
+				processes = append(processes, pid)
+			}
+
+			return 1
+		}),
+		0,
+	)
+	if err != nil {
+		slog.Debug("EnumWindows failed in getRunningTeamsProcesses", slog.String("error", err.Error()))
+	}
+
+	return processes
+}
+
+func (tm *TeamsManager) monitorTeamsStartup() {
+	// Monitor for Teams startup for up to 30 seconds
+	timeout := time.After(30 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			tm.logger.Debug("Teams startup monitoring timed out")
+			return
+		case <-ticker.C:
+			if processes := getRunningTeamsProcesses(); len(processes) > 0 {
+				tm.logger.Info("Detected Teams startup",
+					slog.Int("process_count", len(processes)))
+
+				// Reset consecutive failures on successful detection
+				tm.retryState.ConsecutiveFailures = 0
+
+				// Clear window cache to force fresh discovery
+				tm.windowCache.Mutex.Lock()
+				tm.windowCache.Windows = nil
+				tm.windowCache.LastUpdate = time.Time{}
+				tm.windowCache.Mutex.Unlock()
+
+				return
+			}
+		}
+	}
 }
 
 func sendKeyToWindow(_ win.HWND, vkKey uintptr) error {

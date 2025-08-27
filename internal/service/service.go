@@ -14,105 +14,141 @@ import (
 	ws "golang.org/x/net/websocket"
 )
 
-var serviceState = &websocket.ServiceState{
-	State:            "stopped",
-	PID:              os.Getpid(),
-	Clients:          make(map[*ws.Conn]bool),
-	LastActivity:     time.Now(),
-	TeamsWindowCount: 0,
-	FailureStreak:    0,
+type Service struct {
+	logger   *slog.Logger
+	config   *config.Config
+	state    *websocket.ServiceState
+	teamsMgr *TeamsManager
 }
 
-func SetState(newState string, emit bool) {
-	serviceState.Mutex.Lock()
-	serviceState.State = newState
-	serviceState.Mutex.Unlock()
+type TeamsManager struct {
+	windowCache *WindowCache
+	retryState  *RetryState
+	logger      *slog.Logger
+}
 
-	if emit {
+func NewService(cfg *config.Config) *Service {
+	logger := config.InitLogger(cfg)
+
+	state := &websocket.ServiceState{
+		State:            "stopped",
+		PID:              os.Getpid(),
+		Clients:          make(map[*ws.Conn]bool),
+		LastActivity:     time.Now(),
+		TeamsWindowCount: 0,
+		FailureStreak:    0,
+		Logger:           logger,
+	}
+
+	teamsMgr := &TeamsManager{
+		windowCache: &WindowCache{
+			Windows:       make([]TeamsWindow, 0),
+			CacheDuration: 30 * time.Second,
+		},
+		retryState: &RetryState{
+			MaxBackoff: 300, // 5 minutes max
+		},
+		logger: logger,
+	}
+
+	return &Service{
+		logger:   logger,
+		config:   cfg,
+		state:    state,
+		teamsMgr: teamsMgr,
+	}
+}
+
+func (s *Service) SetState(newState string, emit bool) {
+	s.state.Mutex.Lock()
+	s.state.State = newState
+	currentPID := s.state.PID
+	currentState := s.state.State
+	s.state.Mutex.Unlock()
+
+	if emit && s.config.WebSocket {
 		websocket.Broadcast(&websocket.Event{
 			Service: "teams-green",
-			Status:  serviceState.State,
-			PID:     serviceState.PID,
-			Message: fmt.Sprintf("State changed to %s", serviceState.State),
-		}, serviceState)
+			Status:  currentState,
+			PID:     currentPID,
+			Message: fmt.Sprintf("State changed to %s", currentState),
+		}, s.state)
 	}
-	serviceState.Logger.Info("Service state changed",
-		slog.String("state", serviceState.State),
-		slog.Int("pid", serviceState.PID))
+	s.logger.Info("Service state changed",
+		slog.String("state", currentState),
+		slog.Int("pid", currentPID))
 }
 
-func MainLoop(ctx context.Context, loopTime time.Duration, wsEnabled bool) {
+func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 	ticker := time.NewTicker(loopTime)
 	defer ticker.Stop()
 
 	teamsMissingCount := 0
 	const maxMissingLogs = 3
 
-	serviceState.Logger.Info("Main loop started",
+	s.logger.Info("Main loop started",
 		slog.Duration("interval", loopTime))
 
 	for {
 		select {
 		case <-ticker.C:
-			if err := SendKeysToTeams(); err != nil {
+			if err := s.teamsMgr.SendKeysToTeams(s.state); err != nil {
 				teamsMissingCount++
-				serviceState.Mutex.Lock()
-				serviceState.FailureStreak++
-				serviceState.Mutex.Unlock()
+				s.state.Mutex.Lock()
+				s.state.FailureStreak++
+				s.state.Mutex.Unlock()
 
 				if teamsMissingCount <= maxMissingLogs {
-					serviceState.Logger.Warn("Teams activity failed",
+					s.logger.Warn("Teams activity failed",
 						slog.String("error", err.Error()),
 						slog.Int("missing_count", teamsMissingCount),
-						slog.Int("failure_streak", serviceState.FailureStreak))
-					if wsEnabled {
+						slog.Int("failure_streak", s.state.FailureStreak))
+					if s.config.WebSocket {
 						websocket.Broadcast(&websocket.Event{
 							Service: "teams-green",
 							Status:  "warning",
-							PID:     serviceState.PID,
+							PID:     s.state.PID,
 							Message: err.Error(),
-						}, serviceState)
+						}, s.state)
 					}
 				}
 			} else {
 				// Success - update activity tracking
-				serviceState.Mutex.Lock()
-				serviceState.LastActivity = time.Now()
-				serviceState.TeamsWindowCount = len(FindTeamsWindows())
-				if serviceState.FailureStreak > 0 {
-					serviceState.Logger.Info("Teams activity resumed",
-						slog.Int("was_failure_streak", serviceState.FailureStreak),
-						slog.Int("teams_windows", serviceState.TeamsWindowCount))
-					if wsEnabled {
+				s.state.Mutex.Lock()
+				s.state.LastActivity = time.Now()
+				s.state.TeamsWindowCount = len(s.teamsMgr.FindTeamsWindows())
+				if s.state.FailureStreak > 0 {
+					s.logger.Info("Teams activity resumed",
+						slog.Int("was_failure_streak", s.state.FailureStreak),
+						slog.Int("teams_windows", s.state.TeamsWindowCount))
+					if s.config.WebSocket {
 						websocket.Broadcast(&websocket.Event{
 							Service: "teams-green",
 							Status:  "running",
-							PID:     serviceState.PID,
-							Message: fmt.Sprintf("Teams activity resumed (found %d windows)", serviceState.TeamsWindowCount),
-						}, serviceState)
+							PID:     s.state.PID,
+							Message: fmt.Sprintf("Teams activity resumed (found %d windows)", s.state.TeamsWindowCount),
+						}, s.state)
 					}
 				}
-				serviceState.FailureStreak = 0
-				serviceState.Mutex.Unlock()
+				s.state.FailureStreak = 0
+				s.state.Mutex.Unlock()
 				teamsMissingCount = 0
 			}
 		case <-ctx.Done():
-			serviceState.Logger.Info("Main loop stopping")
+			s.logger.Info("Main loop stopping")
 			return
 		}
 	}
 }
 
-func Run(cfg *config.Config) error {
-	serviceState.Logger = config.InitLogger(cfg)
-
+func (s *Service) Run() error {
 	// Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Start WebSocket server if enabled
-	if cfg.WebSocket {
-		if err := websocket.StartServer(cfg.Port, serviceState); err != nil {
+	if s.config.WebSocket {
+		if err := websocket.StartServer(s.config.Port, s.state); err != nil {
 			return fmt.Errorf("failed to start WebSocket server: %v", err)
 		}
 
@@ -123,19 +159,19 @@ func Run(cfg *config.Config) error {
 		}()
 	}
 
-	SetState("running", cfg.WebSocket)
+	s.SetState("running", s.config.WebSocket)
 
 	// Start main loop
-	go MainLoop(ctx, time.Duration(cfg.Interval)*time.Second, cfg.WebSocket)
+	go s.MainLoop(ctx, time.Duration(s.config.Interval)*time.Second)
 
 	// Wait for shutdown signal
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	<-sigs
 
-	serviceState.Logger.Info("Shutting down service")
+	s.logger.Info("Shutting down service")
 	cancel()
-	SetState("stopped", cfg.WebSocket)
+	s.SetState("stopped", s.config.WebSocket)
 	time.Sleep(500 * time.Millisecond)
 	return nil
 }

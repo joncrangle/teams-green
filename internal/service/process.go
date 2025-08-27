@@ -162,9 +162,10 @@ func GetEnhancedStatus() (bool, int, *StatusInfo, error) {
 
 	if IsProcessRunning(pid) {
 		// Try to read service state if available (this is a simplified approach)
+		tempService := NewService(&config.Config{Debug: false, LogFormat: "text", Interval: 180})
 		info := &StatusInfo{
 			LastActivity:     time.Now(), // Default to now if we can't get actual info
-			TeamsWindowCount: len(FindTeamsWindows()),
+			TeamsWindowCount: len(tempService.teamsMgr.FindTeamsWindows()),
 			FailureStreak:    0, // Can't get this from external process
 		}
 		return true, pid, info, nil
