@@ -7,6 +7,8 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -38,13 +40,28 @@ type WindowEnumContext struct {
 	logger           *slog.Logger
 }
 
-var teamsExecutables []string
+var (
+	teamsExecutables    []string
+	executablesCache    []string
+	executablesCacheMux sync.RWMutex
+	lastDiscoveryTime   time.Time
+	discoveryInProgress int32 // atomic flag
+)
 
 func init() {
-	teamsExecutables = discoverTeamsExecutables()
+	teamsExecutables = discoverTeamsExecutablesSync()
+	executablesCache = make([]string, len(teamsExecutables))
+	copy(executablesCache, teamsExecutables)
+	lastDiscoveryTime = time.Now()
+
+	// Start background refresh after 5 minutes
+	go func() {
+		time.Sleep(5 * time.Minute)
+		refreshTeamsExecutablesAsync()
+	}()
 }
 
-func discoverTeamsExecutables() []string {
+func discoverTeamsExecutablesSync() []string {
 	baseExes := []string{
 		"ms-teams.exe",
 		"teams.exe",
@@ -54,7 +71,66 @@ func discoverTeamsExecutables() []string {
 	var discovered []string
 	discovered = append(discovered, baseExes...)
 
-	// Check registry for Teams installations
+	// Quick registry check (limited to avoid blocking)
+	if regExes := getTeamsFromRegistryQuick(); len(regExes) > 0 {
+		for _, exe := range regExes {
+			if !slices.Contains(discovered, exe) {
+				discovered = append(discovered, exe)
+			}
+		}
+	}
+
+	return discovered
+}
+
+func refreshTeamsExecutablesAsync() {
+	// Use atomic compare-and-swap to ensure only one discovery runs at a time
+	if !atomic.CompareAndSwapInt32(&discoveryInProgress, 0, 1) {
+		return // Another discovery is in progress
+	}
+	defer atomic.StoreInt32(&discoveryInProgress, 0)
+
+	// Only refresh if it's been more than 30 minutes since last discovery
+	executablesCacheMux.RLock()
+	timeSinceLastDiscovery := time.Since(lastDiscoveryTime)
+	executablesCacheMux.RUnlock()
+
+	if timeSinceLastDiscovery < 30*time.Minute {
+		return
+	}
+
+	discovered := discoverTeamsExecutablesFull()
+
+	executablesCacheMux.Lock()
+	executablesCache = discovered
+	lastDiscoveryTime = time.Now()
+	executablesCacheMux.Unlock()
+
+	// Schedule next refresh
+	time.AfterFunc(30*time.Minute, refreshTeamsExecutablesAsync)
+}
+
+func getTeamsExecutables() []string {
+	executablesCacheMux.RLock()
+	defer executablesCacheMux.RUnlock()
+
+	// Return a copy to prevent concurrent modification
+	result := make([]string, len(executablesCache))
+	copy(result, executablesCache)
+	return result
+}
+
+func discoverTeamsExecutablesFull() []string {
+	baseExes := []string{
+		"ms-teams.exe",
+		"teams.exe",
+		"msteams.exe",
+	}
+
+	var discovered []string
+	discovered = append(discovered, baseExes...)
+
+	// Check registry for Teams installations (full scan)
 	if regExes := getTeamsFromRegistry(); len(regExes) > 0 {
 		for _, exe := range regExes {
 			if !slices.Contains(discovered, exe) {
@@ -86,6 +162,28 @@ func discoverTeamsExecutables() []string {
 	}
 
 	return discovered
+}
+
+func getTeamsFromRegistryQuick() []string {
+	// Quick registry check with timeout to avoid blocking
+	var executables []string
+
+	// Use a timeout to prevent hanging
+	timeout := time.After(2 * time.Second)
+	done := make(chan []string, 1)
+
+	go func() {
+		result := getTeamsFromRegistry()
+		done <- result
+	}()
+
+	select {
+	case result := <-done:
+		return result
+	case <-timeout:
+		// Return empty if registry check takes too long
+		return executables
+	}
 }
 
 func getTeamsFromRegistry() []string {
@@ -133,22 +231,38 @@ func getTeamsFromRegistry() []string {
 }
 
 func getWindowTitle(hwnd win.HWND) string {
-	ret, _, _ := procGetWindowTextLength.Call(uintptr(hwnd))
-	if ret == 0 {
+	if hwnd == 0 {
 		return ""
 	}
 
-	buf := make([]uint16, ret+1)
+	ret, _, _ := procGetWindowTextLength.Call(uintptr(hwnd))
+	if ret == 0 || ret > 32767 { // Reasonable upper limit to prevent excessive allocation
+		return ""
+	}
+
+	length := int(ret)
+	buf := make([]uint16, length+1)
 	ret, _, _ = procGetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if ret == 0 {
 		return ""
 	}
 
-	return windows.UTF16ToString(buf)
+	// Ensure we don't read beyond actual returned length
+	actualLength := min(int(ret), len(buf)-1)
+	return windows.UTF16ToString(buf[:actualLength])
 }
 
 func enumWindowsProc(hwnd syscall.Handle, lParam uintptr) uintptr {
+	// Validate parameters
+	if hwnd == 0 || lParam == 0 {
+		return 1
+	}
+
 	ctx := (*WindowEnumContext)(unsafe.Pointer(lParam))
+	if ctx == nil || ctx.hwnds == nil {
+		return 1
+	}
+
 	hwnds := ctx.hwnds
 
 	// Skip invisible windows
@@ -160,18 +274,25 @@ func enumWindowsProc(hwnd syscall.Handle, lParam uintptr) uintptr {
 	var pid uint32
 	_, _, _ = procGetWindowThreadProcessID.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&pid)))
 
+	// Validate PID
+	if pid == 0 {
+		return 1
+	}
+
 	hProcess, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil || hProcess == 0 {
 		return 1
 	}
-	defer func(handle windows.Handle) {
-		if closeErr := windows.CloseHandle(handle); closeErr != nil {
+
+	// Ensure handle is always closed, even if function returns early
+	defer func() {
+		if closeErr := windows.CloseHandle(hProcess); closeErr != nil {
 			ctx.logger.Debug("Failed to close process handle",
 				slog.String("error", closeErr.Error()),
 				slog.Uint64("pid", uint64(pid)),
-				slog.Uint64("handle", uint64(uintptr(handle))))
+				slog.Uint64("handle", uint64(uintptr(hProcess))))
 		}
-	}(hProcess)
+	}()
 
 	var exeName [windows.MAX_PATH]uint16
 	size := uint32(len(exeName))
@@ -215,34 +336,38 @@ func (tm *TeamsManager) updateWindowCache(hwnds []win.HWND) {
 		if err != nil {
 			continue
 		}
-		defer func(handle windows.Handle) {
-			if closeErr := windows.CloseHandle(handle); closeErr != nil {
-				slog.Debug("Failed to close process handle during cache update",
-					slog.String("error", closeErr.Error()),
-					slog.Uint64("pid", uint64(pid)),
-					slog.Uint64("handle", uint64(uintptr(handle))))
+
+		// Ensure handle is always closed
+		func() {
+			defer func() {
+				if closeErr := windows.CloseHandle(hProcess); closeErr != nil {
+					tm.logger.Debug("Failed to close process handle during cache update",
+						slog.String("error", closeErr.Error()),
+						slog.Uint64("pid", uint64(pid)),
+						slog.Uint64("handle", uint64(uintptr(hProcess))))
+				}
+			}()
+
+			var exeName [windows.MAX_PATH]uint16
+			size := uint32(len(exeName))
+			var executablePath string
+			if err := windows.QueryFullProcessImageName(hProcess, 0, &exeName[0], &size); err == nil {
+				executablePath = windows.UTF16ToString(exeName[:size])
 			}
-		}(hProcess)
 
-		var exeName [windows.MAX_PATH]uint16
-		size := uint32(len(exeName))
-		var executablePath string
-		if err := windows.QueryFullProcessImageName(hProcess, 0, &exeName[0], &size); err == nil {
-			executablePath = windows.UTF16ToString(exeName[:size])
-		}
+			windowTitle := getWindowTitle(hwnd)
 
-		windowTitle := getWindowTitle(hwnd)
+			window := TeamsWindow{
+				HWND:           hwnd,
+				ProcessID:      pid,
+				ExecutablePath: executablePath,
+				WindowTitle:    windowTitle,
+				LastSeen:       now,
+				IsValid:        true,
+			}
 
-		window := TeamsWindow{
-			HWND:           hwnd,
-			ProcessID:      pid,
-			ExecutablePath: executablePath,
-			WindowTitle:    windowTitle,
-			LastSeen:       now,
-			IsValid:        true,
-		}
-
-		newWindows = append(newWindows, window)
+			newWindows = append(newWindows, window)
+		}()
 	}
 
 	tm.windowCache.Windows = newWindows
@@ -251,7 +376,20 @@ func (tm *TeamsManager) updateWindowCache(hwnds []win.HWND) {
 
 func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
 	tm.windowCache.Mutex.RLock()
+
+	now := time.Now()
 	cacheValid := time.Since(tm.windowCache.LastUpdate) < tm.windowCache.CacheDuration
+
+	// Check for system sleep/hibernation by looking for large time gaps
+	timeSinceLastCheck := time.Since(tm.windowCache.LastCacheCheck)
+	if timeSinceLastCheck > 2*tm.windowCache.CacheDuration {
+		tm.logger.Debug("Detected possible system sleep/hibernation, invalidating cache",
+			slog.Duration("time_gap", timeSinceLastCheck))
+		cacheValid = false
+	}
+
+	// Update last check time
+	tm.windowCache.LastCacheCheck = now
 
 	// Adaptive full scan interval based on failure rate
 	fullScanInterval := tm.windowCache.AdaptiveScanInterval
@@ -473,21 +611,27 @@ func (tm *TeamsManager) handleTeamsNotFound(_ *websocket.ServiceState) error {
 	now := time.Now()
 
 	// Check if circuit breaker should close (recovery period)
-	if tm.retryState.CircuitBreakerOpen && time.Since(tm.retryState.CircuitOpenTime) > 2*time.Minute {
-		tm.retryState.CircuitBreakerOpen = false
-		tm.retryState.ConsecutiveFailures = 0
-		tm.logger.Info("Circuit breaker closed - attempting recovery")
+	if tm.retryState.CircuitBreakerOpen {
+		timeSinceOpened := time.Since(tm.retryState.CircuitOpenTime)
+		if timeSinceOpened > 2*time.Minute {
+			tm.retryState.CircuitBreakerOpen = false
+			tm.retryState.ConsecutiveFailures = max(0, tm.retryState.ConsecutiveFailures-5) // Gradual recovery
+			tm.logger.Info("Circuit breaker closed - attempting recovery",
+				slog.Int("remaining_consecutive_failures", tm.retryState.ConsecutiveFailures))
+		} else {
+			// Still in circuit breaker open state
+			return fmt.Errorf("circuit breaker open - Teams unavailable (open for %v, consecutive failures: %d)",
+				timeSinceOpened.Truncate(time.Second), tm.retryState.ConsecutiveFailures)
+		}
 	}
 
 	// Open circuit breaker if too many consecutive failures
-	if tm.retryState.ConsecutiveFailures >= 20 {
-		if !tm.retryState.CircuitBreakerOpen {
-			tm.retryState.CircuitBreakerOpen = true
-			tm.retryState.CircuitOpenTime = now
-			tm.logger.Warn("Circuit breaker opened due to consecutive failures",
-				slog.Int("consecutive_failures", tm.retryState.ConsecutiveFailures))
-		}
-		return fmt.Errorf("circuit breaker open - Teams unavailable (consecutive failures: %d)", tm.retryState.ConsecutiveFailures)
+	if tm.retryState.ConsecutiveFailures >= 20 && !tm.retryState.CircuitBreakerOpen {
+		tm.retryState.CircuitBreakerOpen = true
+		tm.retryState.CircuitOpenTime = now
+		tm.logger.Warn("Circuit breaker opened due to consecutive failures",
+			slog.Int("consecutive_failures", tm.retryState.ConsecutiveFailures))
+		return fmt.Errorf("circuit breaker opened - Teams unavailable (consecutive failures: %d)", tm.retryState.ConsecutiveFailures)
 	}
 
 	if tm.retryState.FailureCount == 0 {
@@ -535,9 +679,13 @@ func getRunningTeamsProcesses() []uint32 {
 	var processes []uint32
 	var hwnds []win.HWND
 
+	// Pre-allocate with reasonable capacity to reduce allocations
+	processes = make([]uint32, 0, 10)
+	processSet := make(map[uint32]bool, 10) // Use map for O(1) duplicate detection
+
 	enumCtx := &WindowEnumContext{
 		hwnds:            &hwnds,
-		teamsExecutables: teamsExecutables,
+		teamsExecutables: getTeamsExecutables(),
 		logger:           slog.Default(),
 	}
 
@@ -552,13 +700,15 @@ func getRunningTeamsProcesses() []uint32 {
 			if err != nil || hProcess == 0 {
 				return 1
 			}
-			defer func(handle windows.Handle) {
-				if closeErr := windows.CloseHandle(handle); closeErr != nil {
+
+			// Ensure handle is closed immediately after use
+			defer func() {
+				if closeErr := windows.CloseHandle(hProcess); closeErr != nil {
 					ctx.logger.Debug("Failed to close process handle in getRunningTeamsProcesses",
 						slog.String("error", closeErr.Error()),
 						slog.Uint64("pid", uint64(pid)))
 				}
-			}(hProcess)
+			}()
 
 			var exeName [windows.MAX_PATH]uint16
 			size := uint32(len(exeName))
@@ -577,13 +727,11 @@ func getRunningTeamsProcesses() []uint32 {
 			}
 
 			if slices.Contains(ctx.teamsExecutables, exeBase) {
-				// Check if PID is already in the list
-				for _, existingPID := range processes {
-					if existingPID == pid {
-						return 1 // Already added
-					}
+				// Use map to avoid duplicates with O(1) lookup
+				if !processSet[pid] {
+					processSet[pid] = true
+					processes = append(processes, pid)
 				}
-				processes = append(processes, pid)
 			}
 
 			return 1

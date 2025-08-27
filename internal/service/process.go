@@ -89,9 +89,21 @@ func Start(cfg *config.Config) error {
 
 	pidContent := fmt.Sprintf("%d", cmd.Process.Pid)
 	if err := os.WriteFile(config.PidFile, []byte(pidContent), 0o644); err != nil {
+		// Attempt to kill the process before returning error
 		if killErr := cmd.Process.Kill(); killErr != nil {
-			return fmt.Errorf("service started but failed to write PID file (%w) and failed to cleanup process (%v)", err, killErr)
+			// Wait a bit to ensure process cleanup, then try to get exit status
+			time.Sleep(100 * time.Millisecond)
+			if waitErr := cmd.Wait(); waitErr != nil {
+				return fmt.Errorf("service started but failed to write PID file (%w), failed to cleanup process (%v), and failed to wait for process (%v)", err, killErr, waitErr)
+			}
+			return fmt.Errorf("service started but failed to write PID file (%w) and failed to kill process (%v)", err, killErr)
 		}
+
+		// Wait for process to actually exit
+		if waitErr := cmd.Wait(); waitErr != nil {
+			return fmt.Errorf("service started but failed to write PID file (%w), killed process but failed to wait (%v)", err, waitErr)
+		}
+
 		return fmt.Errorf("service started but failed to write PID file: %w", err)
 	}
 

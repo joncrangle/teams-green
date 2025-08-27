@@ -30,23 +30,39 @@ var PidFile string
 
 // Global log file handle that can be closed properly
 var (
-	logFile      *os.File
-	logFileMutex sync.Mutex
+	logFile       *os.File
+	logFileMutex  sync.RWMutex // Use RWMutex for better concurrency
+	logFileClosed bool         // Track if file is already closed
 )
 
 type LogFileCloser struct {
 	*os.File
+	closed *bool
+	mu     *sync.RWMutex
+}
+
+func (lfc *LogFileCloser) Write(p []byte) (n int, err error) {
+	lfc.mu.RLock()
+	defer lfc.mu.RUnlock()
+
+	if *lfc.closed || lfc.File == nil {
+		return 0, fmt.Errorf("log file is closed")
+	}
+	return lfc.File.Write(p)
 }
 
 func (lfc *LogFileCloser) Close() error {
-	logFileMutex.Lock()
-	defer logFileMutex.Unlock()
-	if lfc.File != nil {
-		err := lfc.File.Close()
-		lfc.File = nil
-		return err
+	lfc.mu.Lock()
+	defer lfc.mu.Unlock()
+
+	if *lfc.closed || lfc.File == nil {
+		return nil // Already closed
 	}
-	return nil
+
+	*lfc.closed = true
+	err := lfc.File.Close()
+	lfc.File = nil
+	return err
 }
 
 func init() {
@@ -129,7 +145,7 @@ func setupLogFile(cfg *Config) (io.Writer, error) {
 	defer logFileMutex.Unlock()
 
 	// Close existing log file if open
-	if logFile != nil {
+	if logFile != nil && !logFileClosed {
 		logFile.Close()
 		logFile = nil
 	}
@@ -140,16 +156,22 @@ func setupLogFile(cfg *Config) (io.Writer, error) {
 	}
 
 	logFile = file
-	return &LogFileCloser{File: file}, nil
+	logFileClosed = false
+	return &LogFileCloser{
+		File:   file,
+		closed: &logFileClosed,
+		mu:     &logFileMutex,
+	}, nil
 }
 
 // CloseLogFile should be called during shutdown to properly close the log file
 func CloseLogFile() {
 	logFileMutex.Lock()
 	defer logFileMutex.Unlock()
-	if logFile != nil {
+	if logFile != nil && !logFileClosed {
 		logFile.Close()
 		logFile = nil
+		logFileClosed = true
 	}
 }
 

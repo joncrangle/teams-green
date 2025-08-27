@@ -35,6 +35,8 @@ type WindowCache struct {
 	FailureCount         int
 	LastFailure          time.Time
 	AdaptiveScanInterval time.Duration
+	SystemBootTime       time.Time // Track system boot time to detect hibernation/sleep
+	LastCacheCheck       time.Time // Track when cache was last validated
 }
 
 type RetryState struct {
@@ -81,9 +83,11 @@ func NewService(cfg *config.Config) *Service {
 			Windows:              make([]TeamsWindow, 0),
 			CacheDuration:        30 * time.Second,
 			AdaptiveScanInterval: 5 * time.Minute,
+			SystemBootTime:       time.Now(), // Initialize with current time
+			LastCacheCheck:       time.Now(),
 		},
 		enumContext: &WindowEnumContext{
-			teamsExecutables: teamsExecutables,
+			teamsExecutables: getTeamsExecutables(),
 			logger:           logger,
 		},
 		retryState: &RetryState{

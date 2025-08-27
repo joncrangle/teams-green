@@ -38,13 +38,6 @@ func StartServer(port int, state *ServiceState) error {
 		return fmt.Errorf("websocket server is already running")
 	}
 
-	// Test if port is available by trying to bind to it
-	testListener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		return fmt.Errorf("port %d is not available: %w", port, err)
-	}
-	testListener.Close()
-
 	mux := http.NewServeMux()
 	mux.Handle("/ws", websocket.Handler(func(ws *websocket.Conn) {
 		HandleConnection(ws, state)
@@ -57,24 +50,41 @@ func StartServer(port int, state *ServiceState) error {
 		WriteTimeout: 15 * time.Second,
 	}
 
-	// Use a channel to wait for server to actually start
-	serverStarted := make(chan error, 1)
+	// Create listener first to ensure port is available and bound
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return fmt.Errorf("failed to bind to port %d: %w", port, err)
+	}
+
+	// Use a channel to signal actual server startup completion
+	serverReady := make(chan error, 1)
 
 	go func() {
+		defer close(serverReady)
+
 		state.Logger.Info("WebSocket server starting",
 			slog.String("address", fmt.Sprintf("ws://127.0.0.1:%d/ws", port)))
 
-		// Signal that server is starting
-		serverStarted <- nil
-
-		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+		if err := server.Serve(listener); err != http.ErrServerClosed {
 			state.Logger.Error("WebSocket server error", slog.String("error", err.Error()))
 			atomic.StoreInt32(&serverRunning, 0)
+			serverReady <- err
+			return
 		}
+		atomic.StoreInt32(&serverRunning, 0)
 	}()
 
-	// Wait for server to start
-	<-serverStarted
+	// Give server a moment to actually start serving
+	select {
+	case err := <-serverReady:
+		if err != nil {
+			listener.Close()
+			return fmt.Errorf("server failed to start: %w", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		// Server is likely running successfully
+	}
+
 	atomic.StoreInt32(&serverRunning, 1)
 	return nil
 }

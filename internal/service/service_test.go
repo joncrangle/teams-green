@@ -253,7 +253,7 @@ func TestTeamsWindow(t *testing.T) {
 }
 
 func TestDiscoverTeamsExecutables(t *testing.T) {
-	executables := discoverTeamsExecutables()
+	executables := getTeamsExecutables()
 
 	if len(executables) == 0 {
 		t.Error("should discover at least some teams executables")
