@@ -97,14 +97,17 @@ func HandleConnection(ws *websocket.Conn, state *ServiceState) {
 			slog.Int("active_connections", int(atomic.LoadInt32(&activeConnections))))
 	}()
 
+	// Shared channel for pong updates
+	pongReceived := make(chan struct{}, 1)
+
 	// Separate goroutine for ping/pong handling with proper context management
-	go handlePingPong(ctx, ws, state)
+	go handlePingPong(ctx, ws, state, pongReceived)
 
 	// Message reading loop with timeout handling
-	handleMessages(ctx, ws, state)
+	handleMessages(ctx, ws, state, pongReceived)
 }
 
-func handlePingPong(ctx context.Context, ws *websocket.Conn, state *ServiceState) {
+func handlePingPong(ctx context.Context, ws *websocket.Conn, state *ServiceState, pongReceived <-chan struct{}) {
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 
@@ -114,6 +117,9 @@ func handlePingPong(ctx context.Context, ws *websocket.Conn, state *ServiceState
 		select {
 		case <-ctx.Done():
 			return
+		case <-pongReceived:
+			// Update last pong time when pong is received
+			lastPong = time.Now()
 		case <-ticker.C:
 			// Check for pong timeout
 			if time.Since(lastPong) > pongTimeout {
@@ -140,7 +146,7 @@ func handlePingPong(ctx context.Context, ws *websocket.Conn, state *ServiceState
 	}
 }
 
-func handleMessages(ctx context.Context, ws *websocket.Conn, state *ServiceState) {
+func handleMessages(ctx context.Context, ws *websocket.Conn, state *ServiceState, pongReceived chan<- struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -174,7 +180,12 @@ func handleMessages(ctx context.Context, ws *websocket.Conn, state *ServiceState
 
 			// Handle different message types
 			if strings.Contains(msg, "pong") {
-				// Update last pong time (would need to pass this back somehow)
+				// Signal that pong was received
+				select {
+				case pongReceived <- struct{}{}:
+				default:
+					// Channel is full, skip (shouldn't happen with buffer size 1)
+				}
 				continue
 			}
 
@@ -185,6 +196,16 @@ func handleMessages(ctx context.Context, ws *websocket.Conn, state *ServiceState
 					slog.String("error", err.Error()),
 					slog.String("message", msg),
 					slog.String("remote_addr", ws.Request().RemoteAddr))
+				continue
+			}
+
+			// Handle pong events in JSON format too
+			if event.Type == "pong" {
+				select {
+				case pongReceived <- struct{}{}:
+				default:
+					// Channel is full, skip
+				}
 				continue
 			}
 
