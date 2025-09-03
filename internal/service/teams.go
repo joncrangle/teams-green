@@ -378,11 +378,22 @@ func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
 	tm.windowCache.Mutex.RLock()
 
 	now := time.Now()
-	cacheValid := time.Since(tm.windowCache.LastUpdate) < tm.windowCache.CacheDuration
+
+	// Dynamic cache duration based on failure state
+	cacheDuration := tm.windowCache.CacheDuration
+	if tm.retryState.ConsecutiveFailures > 0 {
+		// Reduce cache duration during failures for faster recovery
+		cacheDuration = 15 * time.Second
+		if tm.retryState.ConsecutiveFailures >= 5 {
+			cacheDuration = 10 * time.Second // Even shorter during persistent failures
+		}
+	}
+
+	cacheValid := time.Since(tm.windowCache.LastUpdate) < cacheDuration
 
 	// Check for system sleep/hibernation by looking for large time gaps
 	timeSinceLastCheck := time.Since(tm.windowCache.LastCacheCheck)
-	if timeSinceLastCheck > 2*tm.windowCache.CacheDuration {
+	if timeSinceLastCheck > 2*cacheDuration {
 		tm.logger.Debug("Detected possible system sleep/hibernation, invalidating cache",
 			slog.Duration("time_gap", timeSinceLastCheck))
 		cacheValid = false
@@ -613,7 +624,7 @@ func (tm *TeamsManager) handleTeamsNotFound(_ *websocket.ServiceState) error {
 	// Check if circuit breaker should close (recovery period)
 	if tm.retryState.CircuitBreakerOpen {
 		timeSinceOpened := time.Since(tm.retryState.CircuitOpenTime)
-		if timeSinceOpened > 2*time.Minute {
+		if timeSinceOpened > 45*time.Second {
 			tm.retryState.CircuitBreakerOpen = false
 			tm.retryState.ConsecutiveFailures = max(0, tm.retryState.ConsecutiveFailures-5) // Gradual recovery
 			tm.logger.Info("Circuit breaker closed - attempting recovery",
@@ -626,7 +637,7 @@ func (tm *TeamsManager) handleTeamsNotFound(_ *websocket.ServiceState) error {
 	}
 
 	// Open circuit breaker if too many consecutive failures
-	if tm.retryState.ConsecutiveFailures >= 20 && !tm.retryState.CircuitBreakerOpen {
+	if tm.retryState.ConsecutiveFailures >= 12 && !tm.retryState.CircuitBreakerOpen {
 		tm.retryState.CircuitBreakerOpen = true
 		tm.retryState.CircuitOpenTime = now
 		tm.logger.Warn("Circuit breaker opened due to consecutive failures",
@@ -642,7 +653,7 @@ func (tm *TeamsManager) handleTeamsNotFound(_ *websocket.ServiceState) error {
 	tm.retryState.ConsecutiveFailures++
 
 	// Check if we should attempt Teams process restart detection
-	if tm.retryState.ConsecutiveFailures >= 10 &&
+	if tm.retryState.ConsecutiveFailures >= 5 &&
 		time.Since(tm.retryState.LastTeamsRestart) > 5*time.Minute {
 
 		// Check if Teams processes still exist
@@ -746,8 +757,8 @@ func getRunningTeamsProcesses() []uint32 {
 }
 
 func (tm *TeamsManager) monitorTeamsStartup() {
-	// Monitor for Teams startup for up to 30 seconds
-	timeout := time.After(30 * time.Second)
+	// Monitor for Teams startup for up to 60 seconds
+	timeout := time.After(60 * time.Second)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
