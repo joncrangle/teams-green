@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/joncrangle/teams-green/internal/config"
 
@@ -171,11 +172,13 @@ func GetEnhancedStatus() (bool, int, *StatusInfo, error) {
 	}
 
 	if IsProcessRunning(pid) {
-		// Basic status info without creating a temporary service
+		// Get actual Teams window count by detecting windows
+		teamsWindowCount := getTeamsWindowCountForStatus()
+
 		info := &StatusInfo{
 			LastActivity:     time.Now(), // Default to now if we can't get actual info
-			TeamsWindowCount: 0,          // Can't get this from external process reliably
-			FailureStreak:    0,          // Can't get this from external process
+			TeamsWindowCount: teamsWindowCount,
+			FailureStreak:    0, // Can't get this from external process
 		}
 		return true, pid, info, nil
 	}
@@ -191,4 +194,69 @@ type StatusInfo struct {
 	LastActivity     time.Time
 	TeamsWindowCount int
 	FailureStreak    int
+}
+
+// getTeamsWindowCountForStatus detects Teams windows for status reporting
+// This is a simplified version of the main service's Teams detection logic
+func getTeamsWindowCountForStatus() int {
+	var windowCount int
+	teamsExecutables := []string{"ms-teams.exe", "teams.exe", "msteams.exe"}
+
+	// Use the same window enumeration approach as the main service
+	enumCallback := func(hwnd syscall.Handle, _ uintptr) uintptr {
+		// Skip invisible windows
+		ret, _, _ := procIsWindowVisible.Call(uintptr(hwnd))
+		if ret == 0 {
+			return 1
+		}
+
+		var pid uint32
+		_, _, _ = procGetWindowThreadProcessID.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&pid)))
+		if pid == 0 {
+			return 1
+		}
+
+		// Get process executable name
+		hProcess, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+		if err != nil || hProcess == 0 {
+			return 1
+		}
+		defer func() {
+			_ = windows.CloseHandle(hProcess)
+		}()
+
+		var exeName [windows.MAX_PATH]uint16
+		size := uint32(len(exeName))
+		if err := windows.QueryFullProcessImageName(hProcess, 0, &exeName[0], &size); err != nil {
+			return 1
+		}
+
+		// Extract base executable name
+		exePath := windows.UTF16ToString(exeName[:size])
+		lastSlash := strings.LastIndexByte(exePath, '\\')
+		var exeBase string
+		if lastSlash != -1 {
+			exeBase = strings.ToLower(exePath[lastSlash+1:])
+		} else {
+			exeBase = strings.ToLower(exePath)
+		}
+
+		// Check if this is a Teams executable
+		for _, teamsExe := range teamsExecutables {
+			if exeBase == teamsExe {
+				windowCount++
+				break
+			}
+		}
+
+		return 1
+	}
+
+	// Enumerate all windows
+	_, _, _ = procEnumWindows.Call(
+		syscall.NewCallback(enumCallback),
+		0,
+	)
+
+	return windowCount
 }
