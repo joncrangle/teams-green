@@ -129,6 +129,7 @@ teams-green/
 │   ├── config/         # Configuration and logging setup
 │   ├── service/        # Core service logic and Windows integration
 │   └── websocket/      # WebSocket server and broadcasting
+├── .golangci.yml       # Linting configuration
 ├── .goreleaser.yaml    # Release configuration
 └── main.go             # Application entry point
 ```
