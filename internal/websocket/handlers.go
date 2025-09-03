@@ -22,12 +22,12 @@ type Event struct {
 }
 
 const (
-	maxConnections = 50   // Limit concurrent connections
-	maxMessageSize = 1024 // 1KB message limit
-	readTimeout    = 30 * time.Second
-	writeTimeout   = 10 * time.Second
-	pingInterval   = 30 * time.Second
-	pongTimeout    = 60 * time.Second
+	maxConnections = 50                // Limit concurrent connections
+	maxMessageSize = 1024              // 1KB message limit
+	readTimeout    = 120 * time.Second // 2 minutes - more relaxed
+	writeTimeout   = 30 * time.Second  // 30 seconds for writes
+	pingInterval   = 60 * time.Second  // Send ping every minute
+	pongTimeout    = 180 * time.Second // 3 minutes timeout for pong response
 )
 
 var activeConnections int32 // Atomic counter for active connections
