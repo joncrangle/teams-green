@@ -585,6 +585,9 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 		time.Sleep(5 * time.Millisecond)
 	}
 
+	// Add delay before restoring focus to ensure key event is processed by Teams
+	time.Sleep(25 * time.Millisecond)
+
 	// Restore focus to original window
 	if currentWindow != 0 {
 		ret, _, err := procSetForegroundWindow.Call(currentWindow)
@@ -798,10 +801,16 @@ func sendKeyToWindow(_ win.HWND, vkKey uintptr) error {
 		return fmt.Errorf("failed to send key down: %v", err)
 	}
 
+	// Add small delay between key down and key up to ensure proper key processing
+	time.Sleep(2 * time.Millisecond)
+
 	ret, _, err = procKeyboardEvent.Call(vkKey, 0, keyeventfKeyup, 0)
 	if ret == 0 {
 		return fmt.Errorf("failed to send key up: %v", err)
 	}
+
+	// Small delay after key up to ensure the key event is fully processed
+	time.Sleep(3 * time.Millisecond)
 
 	return nil
 }
