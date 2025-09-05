@@ -532,9 +532,20 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 		isMinimized, _, _ := procIsIconic.Call(uintptr(hWnd))
 		isMaximized, _, _ := procIsZoomed.Call(uintptr(hWnd))
 
-		// Try to send key without changing window state first
-		if err := sendKeyToWindow(hWnd, vkF15); err == nil {
-			successCount++
+		// Check if this Teams window already has focus
+		currentFocus, _, _ := procGetForegroundWindow.Call()
+		if currentFocus == uintptr(hWnd) {
+			// Teams window already has focus, safe to send key
+			if err := sendKeyToWindow(hWnd, vkF15); err != nil {
+				slog.Debug("Failed to send F15 key to focused window",
+					slog.String("error", err.Error()),
+					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+				lastError = err
+			} else {
+				successCount++
+				tm.logger.Debug("Sent F15 to already focused Teams window",
+					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+			}
 			continue
 		}
 
@@ -549,21 +560,32 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 				lastError = err
 				continue
 			}
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(2 * time.Millisecond)
 		} else if isMaximized != 0 {
 			originalState = swShowMaximized
 		}
 
-		// Focus and send key
+		// Focus and send key with validation
 		if ret, _, err := procSetForegroundWindow.Call(uintptr(hWnd)); ret != 0 {
-			time.Sleep(5 * time.Millisecond)
-			if err := sendKeyToWindow(hWnd, vkF15); err != nil {
-				slog.Debug("Failed to send F15 key",
-					slog.String("error", err.Error()),
-					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
-				lastError = err
+			time.Sleep(1 * time.Millisecond)
+
+			// Verify focus was actually set before sending key
+			if focusedWindow, _, _ := procGetForegroundWindow.Call(); focusedWindow == uintptr(hWnd) {
+				if err := sendKeyToWindow(hWnd, vkF15); err != nil {
+					slog.Debug("Failed to send F15 key",
+						slog.String("error", err.Error()),
+						slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+					lastError = err
+				} else {
+					successCount++
+					tm.logger.Debug("Sent F15 to newly focused Teams window",
+						slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+				}
 			} else {
-				successCount++
+				slog.Debug("Focus validation failed - skipping key send to prevent leakage",
+					slog.Uint64("expected_hwnd", uint64(uintptr(hWnd))),
+					slog.Uint64("actual_focused", uint64(focusedWindow)))
+				lastError = fmt.Errorf("focus validation failed")
 			}
 		} else {
 			slog.Debug("Failed to set foreground window",
@@ -581,12 +603,10 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 			}
 		}
-
-		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Add delay before restoring focus to ensure key event is processed by Teams
-	time.Sleep(25 * time.Millisecond)
+	// Minimal delay before restoring focus to ensure key event is processed by Teams
+	time.Sleep(5 * time.Millisecond)
 
 	// Restore focus to original window
 	if currentWindow != 0 {
@@ -802,15 +822,12 @@ func sendKeyToWindow(_ win.HWND, vkKey uintptr) error {
 	}
 
 	// Add small delay between key down and key up to ensure proper key processing
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(1 * time.Millisecond)
 
 	ret, _, err = procKeyboardEvent.Call(vkKey, 0, keyeventfKeyup, 0)
 	if ret == 0 {
 		return fmt.Errorf("failed to send key up: %v", err)
 	}
-
-	// Small delay after key up to ensure the key event is fully processed
-	time.Sleep(3 * time.Millisecond)
 
 	return nil
 }
