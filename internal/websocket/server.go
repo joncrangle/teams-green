@@ -78,9 +78,9 @@ func StartServer(port int, state *ServiceState) error {
 
 		server := &http.Server{
 			Handler:      wsHandler,
-			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 15 * time.Second,
-			IdleTimeout:  60 * time.Second,
+			ReadTimeout:  60 * time.Second,  // Increased for stability
+			WriteTimeout: 60 * time.Second,  // Increased for stability
+			IdleTimeout:  300 * time.Second, // 5 minutes idle timeout
 		}
 
 		serverReady <- nil

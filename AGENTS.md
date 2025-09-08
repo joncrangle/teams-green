@@ -20,6 +20,7 @@ Project style
 - Naming: PascalCase (exported), camelCase (unexported); commands end Cmd; files snake_case; constants UPPER_SNAKE
 - CLI: cobra commands in cmd/; flags in init(); default command is start
 - Windows-focused: syscall/win32 in internal/service; isolate platform code
+- Teams integration: use keybd_event API, NOT SendMessage/PostMessage (Teams is Electron app, these APIs don't register keys)
 - WebSocket: golang.org/x/net/websocket; JSON Events; broadcast in internal/websocket; server timestamps
 - Testing: table-driven tests preferred; use testify/assert if needed; mock external dependencies
 

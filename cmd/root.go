@@ -18,7 +18,7 @@ var rootCmd = &cobra.Command{
 	Short: "Keep that Teams status green",
 	Long: `Teams-Green keeps your Microsoft Teams status active by sending 
 periodic keys to prevent the status from going idle.`,
-	Version: "0.2.9",
+	Version: "0.3.0",
 }
 
 var versionCmd = &cobra.Command{
@@ -172,9 +172,9 @@ func addConfigFlags(cmd *cobra.Command, includeShortcuts bool) {
 	cmd.Flags().BoolVar(&cfg.LogRotate, "log-rotate", false, "Enable log file rotation")
 	cmd.Flags().IntVar(&cfg.MaxLogSize, "max-log-size", 10, "Maximum log file size in MB")
 	cmd.Flags().IntVar(&cfg.MaxLogAge, "max-log-age", 30, "Maximum log file age in days")
-	cmd.Flags().IntVar(&cfg.FocusDelayMs, "focus-delay", 100, "Delay after setting focus before sending key (milliseconds)")
-	cmd.Flags().IntVar(&cfg.RestoreDelayMs, "restore-delay", 50, "Delay after restoring minimized window (milliseconds)")
-	cmd.Flags().IntVar(&cfg.KeyProcessDelayMs, "key-process-delay", 75, "Delay before restoring original focus (milliseconds)")
+	cmd.Flags().IntVar(&cfg.FocusDelayMs, "focus-delay", 150, "Delay after setting focus before sending key (milliseconds)")
+	cmd.Flags().IntVar(&cfg.RestoreDelayMs, "restore-delay", 100, "Delay after restoring minimized window (milliseconds)")
+	cmd.Flags().IntVar(&cfg.KeyProcessDelayMs, "key-process-delay", 150, "Delay before restoring original focus (milliseconds)")
 }
 
 func init() {

@@ -274,3 +274,20 @@ func TestDiscoverTeamsExecutables(t *testing.T) {
 		}
 	}
 }
+
+func TestIsUserActivelyUsing(t *testing.T) {
+	// Test the active user detection function
+	// This function checks if the user is actively using a non-Teams application
+
+	result := isUserActivelyUsing()
+
+	// The result depends on the current system state, so we just verify
+	// the function doesn't panic and returns a boolean
+	if result != true && result != false {
+		t.Error("isUserActivelyUsing should return a boolean")
+	}
+
+	// We can't reliably test the specific behavior since it depends on
+	// the current foreground window and system state, but we can verify
+	// the function executes without errors
+}

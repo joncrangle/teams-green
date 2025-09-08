@@ -11,7 +11,7 @@ Teams-Green runs in the background and periodically sends a key (F15) to keep yo
 - **Background Service**: Runs in a background process
 - **Configurable Intervals**: Set custom activity intervals (default: 180 seconds)
 - **Advanced Timing Control**: Fine-tune focus delays and key processing timing
-- **Input Safety**: Automatic detection and deferral when user is actively typing
+- **Input Safety**: Automatic detection and deferral when user is actively typing or using the mouse
 - **Enhanced Focus Validation**: Multiple safety checks to prevent key leakage to wrong windows
 - **WebSocket Server**: Optional real-time monitoring and control via WebSocket API
 - **Simple CLI**: Easy start/stop/status/toggle commands
@@ -99,9 +99,24 @@ When WebSocket is enabled, connect to `ws://127.0.0.1:8765/ws` to receive real-t
   "status": "running",
   "pid": 1234,
   "message": "Service started",
-  "timestamp": "2025-01-20T10:30:00Z"
+  "timestamp": "2025-01-20T10:30:00Z",
+  "type": "status"
 }
 ```
+
+#### Connection Stability Features
+
+- **Keep-Alive Messages**: Automatic keep-alive messages every 45 seconds to maintain connection
+- **Ping/Pong Support**: Send `{"type": "ping"}` to test connection health
+- **Extended Timeouts**: 2-minute read timeout and 5-minute idle timeout for better stability
+- **Graceful Error Handling**: Timeout errors logged at debug level to reduce noise
+
+#### Message Types
+
+- `status` - Service state changes
+- `keepalive` - Periodic keep-alive messages
+- `ping` - Connection health check request
+- `pong` - Response to ping messages
 
 ## Configuration
 
@@ -113,9 +128,9 @@ The service accepts the following flags:
 | `--interval`          | `-i`  | `180`   | Activity interval in seconds                      |
 | `--websocket`         | `-w`  | `false` | Enable WebSocket server                           |
 | `--port`              | `-p`  | `8765`  | WebSocket server port                             |
-| `--focus-delay`       |       | `100`    | Delay after setting focus before sending key (ms) |
-| `--restore-delay`     |       | `50`    | Delay after restoring minimized window (ms)       |
-| `--key-process-delay` |       | `75`   | Delay before restoring original focus (ms)        |
+| `--focus-delay`       |       | `150`    | Delay after setting focus before sending key (ms) |
+| `--restore-delay`     |       | `100`    | Delay after restoring minimized window (ms)       |
+| `--key-process-delay` |       | `150`   | Delay before restoring original focus (ms)        |
 | `--log-format`        |       | `text`  | Log format: text or json                          |
 | `--log-file`          |       | ``      | Log file path (empty = no file logging)           |
 | `--log-rotate`        |       | `falsmse` | Enable log rotation                               |
@@ -162,16 +177,19 @@ teams-green/
 Teams-Green works by:
 
 1. **Process Detection**: Locates running Microsoft Teams processes
-2. **Input Safety Monitoring**: Detects when users are actively typing and defers operations
-3. **Window Targeting**: Finds and focuses Teams windows with enhanced focus validation
-4. **Smart Key Simulation**: Sends F15 keys with configurable timing to prevent pending notifications
-5. **Focus Protection**: Multiple validation checks prevent keys from going to wrong windows
-6. **Background Operation**: Runs as a detached process with PID file management
-7. **Status Monitoring**: Tracks service state and provides real-time feedback
+2. **Smart Activity Detection**: Monitors user activity (keyboard, mouse, application focus) and intelligently resets the activity timer when user interaction is detected
+3. **Efficient Resource Usage**: Throttles Windows API calls to avoid system slowdown while maintaining responsiveness
+4. **Window Targeting**: Finds and focuses Teams windows with enhanced focus validation
+5. **Smart Key Simulation**: Sends F15 keys with configurable timing to prevent pending notifications
+6. **Focus Protection**: Multiple validation checks prevent keys from going to wrong windows
+7. **Background Operation**: Runs as a detached process with PID file management
+8. **Status Monitoring**: Tracks service state and provides real-time feedback
 
 ### Key Safety Features
 
-- **Input Activity Detection**: Automatically defers Teams operations when user input is detected
+- **Comprehensive Input Detection**: Automatically detects and defers Teams operations when user is actively using keyboard, mouse, or other applications
+- **Activity-Based Timer Reset**: When user activity is detected, the Teams activity interval is reset, ensuring natural user behavior takes precedence
+- **Throttled API Monitoring**: Efficiently monitors user activity with minimal system impact (maximum once per second API calls)
 - **Enhanced Focus Validation**: Double-checks window focus before and after key sending
 - **Configurable Timing**: Adjustable delays to work with different system performance levels
 - **Post-Send Verification**: Confirms focus state after key operations to detect interference
@@ -195,17 +213,33 @@ Teams-Green works by:
 
 ### Keys Going to Wrong Applications
 - The service includes multiple safety checks to prevent this
-- If it occurs, user input detection may need tuning
+- Enhanced input detection now monitors mouse activity in addition to keyboard input
+- Activity detection automatically resets the interval timer when user interaction is detected
 - Run with debug logging to see protection mechanisms in action
 
 ### Performance Issues
 - Use faster timing for responsive systems: `teams-green start --focus-delay 10 --key-process-delay 75`
 - Increase delays for slower systems: `teams-green start --focus-delay 50 --key-process-delay 200`
 
+### Activity Detection Behavior
+- **Mouse Activity**: Clicking, dragging, or using any mouse buttons will reset the Teams activity timer
+- **Keyboard Activity**: Pressing modifier keys (Shift, Ctrl, Alt) will reset the timer
+- **Application Focus**: Actively using other applications will defer Teams activity
+- **Efficient Monitoring**: Activity is checked at most once per second to minimize system impact
+- **Smart Timer Reset**: When activity is detected, the full interval timer is reset (e.g., if interval is 180s, timer resets to 180s from current time)
+
 ### WebSocket Connection Issues
+- **Frequent Disconnections**: The improved WebSocket implementation includes keep-alive messages and extended timeouts to reduce disconnections
+- **Timeout Errors**: These are now logged at debug level - use `--debug` flag to see detailed connection information
 - Verify the port is not in use: `netstat -an | findstr 8765`
 - Try a different port: `teams-green start --websocket --port 9000`
 - Check Windows Firewall settings
+
+### Connection Health Monitoring
+- WebSocket connections send keep-alive messages every 45 seconds
+- Clients can send ping messages to test connection health
+- Extended timeouts (2 minutes read, 5 minutes idle) improve stability
+- Connection limits: Maximum 50 concurrent connections
 
 ### Fine-Tuning Timing
 

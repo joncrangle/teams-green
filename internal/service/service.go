@@ -57,10 +57,13 @@ type RetryState struct {
 }
 
 type Service struct {
-	logger   *slog.Logger
-	config   *config.Config
-	state    *websocket.ServiceState
-	teamsMgr *TeamsManager
+	logger             *slog.Logger
+	config             *config.Config
+	state              *websocket.ServiceState
+	teamsMgr           *TeamsManager
+	lastUserActivity   time.Time
+	nextTeamsActivity  time.Time
+	activityCheckMutex sync.RWMutex
 }
 
 type TeamsManager struct {
@@ -106,11 +109,14 @@ func NewService(cfg *config.Config) *Service {
 		config: cfg,
 	}
 
+	now := time.Now()
 	return &Service{
-		logger:   logger,
-		config:   cfg,
-		state:    state,
-		teamsMgr: teamsMgr,
+		logger:            logger,
+		config:            cfg,
+		state:             state,
+		teamsMgr:          teamsMgr,
+		lastUserActivity:  now,
+		nextTeamsActivity: now.Add(time.Duration(cfg.Interval) * time.Second),
 	}
 }
 
@@ -149,9 +155,13 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.logger.Error("Main loop panic recovered", slog.Any("error", r))
-			// Attempt to restart the loop after a delay
+			// Don't restart if context is already done
+			if ctx.Err() != nil {
+				return
+			}
+			// Attempt to restart the loop after a delay only in production
 			time.Sleep(10 * time.Second)
-			if ctx.Err() == nil { // Only restart if context is still valid
+			if ctx.Err() == nil {
 				s.logger.Info("Attempting to restart main loop after panic")
 				go s.MainLoop(ctx, loopTime)
 			}
@@ -163,7 +173,16 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 
 	for {
 		select {
+		case <-ctx.Done():
+			s.logger.Info("Main loop stopping")
+			return
 		case <-ticker.C:
+			// Check context again before processing
+			if ctx.Err() != nil {
+				s.logger.Info("Main loop stopping due to context cancellation")
+				return
+			}
+
 			s.logger.Debug("Main loop tick")
 
 			// Periodic health check
@@ -173,8 +192,19 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 				lastHealthCheck = now
 			}
 
+			// Check for user activity (throttled to avoid excessive API calls)
+			if s.checkUserActivity() {
+				s.logger.Debug("User activity detected, resetting Teams activity timer")
+				continue
+			}
+
+			// Only attempt Teams activity if interval has elapsed
+			if !s.shouldSendTeamsActivity() {
+				continue
+			}
+
 			// Attempt Teams activity with error recovery
-			if err := s.safeTeamsActivity(); err != nil {
+			if err := s.safeTeamsActivity(ctx); err != nil {
 				// Check if this is user input deferral (not an actual failure)
 				if !errors.Is(err, ErrUserInputActive) {
 					// This is an actual failure
@@ -198,16 +228,25 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 						}
 					}
 
-					// Implement exponential backoff for excessive failures
+					// Implement exponential backoff for excessive failures, but respect context
 					if s.state.FailureStreak > 10 {
 						backoffDuration := time.Duration(min(s.state.FailureStreak*2, 60)) * time.Second
 						s.logger.Info("Applying failure backoff", slog.Duration("duration", backoffDuration))
-						time.Sleep(backoffDuration)
+
+						// Use context-aware sleep
+						select {
+						case <-ctx.Done():
+							s.logger.Info("Main loop stopping during backoff")
+							return
+						case <-time.After(backoffDuration):
+							// Continue with backoff
+						}
 					}
 				}
 				// If it's user input deferral, we just skip the success handling and continue the loop
 			} else {
-				// Success - update activity tracking
+				// Success - update activity tracking and reset timer
+				s.resetTeamsActivityTimer()
 				s.state.Mutex.Lock()
 				s.state.LastActivity = time.Now()
 				// Avoid duplicate window enumeration - if SendKeysToTeams succeeded, at least 1 window exists
@@ -229,14 +268,16 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 				s.state.Mutex.Unlock()
 				teamsMissingCount = 0
 			}
-		case <-ctx.Done():
-			s.logger.Info("Main loop stopping")
-			return
 		}
 	}
 }
 
-func (s *Service) safeTeamsActivity() (err error) {
+func (s *Service) safeTeamsActivity(ctx context.Context) (err error) {
+	// Check context before attempting Teams activity
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
 	// Panic recovery for Teams activity
 	defer func() {
 		if r := recover(); r != nil {
@@ -245,7 +286,49 @@ func (s *Service) safeTeamsActivity() (err error) {
 		}
 	}()
 
-	return s.teamsMgr.SendKeysToTeams(s.state)
+	// For tests with very short timeouts, don't perform Teams activity
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return s.teamsMgr.SendKeysToTeams(ctx, s.state)
+	}
+}
+
+func (s *Service) checkUserActivity() bool {
+	// Only check for user activity periodically to avoid excessive API calls
+	s.activityCheckMutex.RLock()
+	lastCheck := s.lastUserActivity
+	s.activityCheckMutex.RUnlock()
+
+	// Only check again if it's been at least 1 second since last check
+	now := time.Now()
+	if now.Sub(lastCheck) < time.Second {
+		return false
+	}
+
+	// Check for active input
+	if s.teamsMgr.isUserInputActive() {
+		s.activityCheckMutex.Lock()
+		s.lastUserActivity = now
+		s.nextTeamsActivity = now.Add(time.Duration(s.config.Interval) * time.Second)
+		s.activityCheckMutex.Unlock()
+		return true
+	}
+
+	return false
+}
+
+func (s *Service) shouldSendTeamsActivity() bool {
+	s.activityCheckMutex.RLock()
+	defer s.activityCheckMutex.RUnlock()
+	return time.Now().After(s.nextTeamsActivity)
+}
+
+func (s *Service) resetTeamsActivityTimer() {
+	s.activityCheckMutex.Lock()
+	s.nextTeamsActivity = time.Now().Add(time.Duration(s.config.Interval) * time.Second)
+	s.activityCheckMutex.Unlock()
 }
 
 func (s *Service) performHealthCheck() {
