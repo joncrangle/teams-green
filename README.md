@@ -10,6 +10,9 @@ Teams-Green runs in the background and periodically sends a key (F15) to keep yo
 
 - **Background Service**: Runs in a background process
 - **Configurable Intervals**: Set custom activity intervals (default: 180 seconds)
+- **Advanced Timing Control**: Fine-tune focus delays and key processing timing
+- **Input Safety**: Automatic detection and deferral when user is actively typing
+- **Enhanced Focus Validation**: Multiple safety checks to prevent key leakage to wrong windows
 - **WebSocket Server**: Optional real-time monitoring and control via WebSocket API
 - **Simple CLI**: Easy start/stop/status/toggle commands
 - **Debug Mode**: Foreground execution with detailed logging
@@ -67,14 +70,23 @@ teams-green start --debug
 # Start with WebSocket server
 teams-green start --websocket --port 8765
 
+# Configure timing delays for reliability (milliseconds)
+teams-green start --focus-delay 30 --key-process-delay 150
+
+# Conservative timing to prevent pending notifications
+teams-green start --focus-delay 25 --restore-delay 20 --key-process-delay 200
+
+# Fast timing for performance (if Teams responds quickly)
+teams-green start --focus-delay 10 --key-process-delay 75
+
 # Enable logging to file with rotation
 teams-green start --log-file logs/teams-green.log --log-rotate
 
 # Use JSON logging format
 teams-green start --log-format json --log-file logs/teams-green.log
 
-# Combine options
-teams-green start --debug --websocket --interval 60 --log-file logs/debug.log
+# Combine options for troubleshooting
+teams-green start --debug --focus-delay 50 --key-process-delay 150 --log-file debug.log
 ```
 
 ### WebSocket API
@@ -95,17 +107,28 @@ When WebSocket is enabled, connect to `ws://127.0.0.1:8765/ws` to receive real-t
 
 The service accepts the following flags:
 
-| Flag | Short | Default | Description |
-|------|-------|---------|-------------|
-| `--debug` | `-d` | `false` | Run in foreground with debug logging |
-| `--interval` | `-i` | `180` | Activity interval in seconds |
-| `--websocket` | `-w` | `false` | Enable WebSocket server |
-| `--port` | `-p` | `8765` | WebSocket server port |
-| `--log-format` | | `text` | Log format: text or json |
-| `--log-file` | | `` | Log file path (empty = no file logging) |
-| `--log-rotate` | | `false` | Enable log rotation |
-| `--max-log-size` | | `10` | Maximum log file size in MB |
-| `--max-log-age` | | `30` | Maximum log file age in days |
+| Flag                  | Short | Default | Description                                       |
+|-----------------------|-------|---------|---------------------------------------------------|
+| `--debug`             | `-d`  | `false` | Run in foreground with debug logging              |
+| `--interval`          | `-i`  | `180`   | Activity interval in seconds                      |
+| `--websocket`         | `-w`  | `false` | Enable WebSocket server                           |
+| `--port`              | `-p`  | `8765`  | WebSocket server port                             |
+| `--focus-delay`       |       | `20`    | Delay after setting focus before sending key (ms) |
+| `--restore-delay`     |       | `20`    | Delay after restoring minimized window (ms)       |
+| `--key-process-delay` |       | `75`   | Delay before restoring original focus (ms)        |
+| `--log-format`        |       | `text`  | Log format: text or json                          |
+| `--log-file`          |       | ``      | Log file path (empty = no file logging)           |
+| `--log-rotate`        |       | `false` | Enable log rotation                               |
+| `--max-log-size`      |       | `10`    | Maximum log file size in MB                       |
+| `--max-log-age`       |       | `30`    | Maximum log file age in days                      |
+
+### Timing Configuration
+
+The timing delays control how the service interacts with Teams windows:
+
+- **`--focus-delay`**: Time to wait after focusing a Teams window before sending the key. Increase if Teams needs more time to process focus changes.
+- **`--restore-delay`**: Time to wait after restoring a minimized Teams window. Increase if Windows is slow to restore windows.
+- **`--key-process-delay`**: Time to wait before restoring focus to the original window. **Most important for preventing pending notifications** - increase to 150-200ms if Teams shows pending items.
 
 ## Development
 
@@ -139,10 +162,19 @@ teams-green/
 Teams-Green works by:
 
 1. **Process Detection**: Locates running Microsoft Teams processes
-2. **Window Targeting**: Finds and focuses Teams windows when needed
-3. **Key Simulation**: Sends keys (F15) that doesn't disrupt usage
-4. **Background Operation**: Runs as a detached process with PID file management
-5. **Status Monitoring**: Tracks service state and provides real-time feedback
+2. **Input Safety Monitoring**: Detects when users are actively typing and defers operations
+3. **Window Targeting**: Finds and focuses Teams windows with enhanced focus validation
+4. **Smart Key Simulation**: Sends F15 keys with configurable timing to prevent pending notifications
+5. **Focus Protection**: Multiple validation checks prevent keys from going to wrong windows
+6. **Background Operation**: Runs as a detached process with PID file management
+7. **Status Monitoring**: Tracks service state and provides real-time feedback
+
+### Key Safety Features
+
+- **Input Activity Detection**: Automatically defers Teams operations when user input is detected
+- **Enhanced Focus Validation**: Double-checks window focus before and after key sending
+- **Configurable Timing**: Adjustable delays to work with different system performance levels
+- **Post-Send Verification**: Confirms focus state after key operations to detect interference
 
 ## Troubleshooting
 
@@ -156,10 +188,47 @@ Teams-Green works by:
 - Check Windows focus policies and permissions
 - Ensure Teams has proper window focus
 
+### Teams Shows Pending Notifications After Key Send
+- **Most Common Issue**: Increase key processing delay: `teams-green start --key-process-delay 150`
+- Try conservative timing: `teams-green start --focus-delay 30 --key-process-delay 200`
+- Run in debug mode to monitor timing: `teams-green start --debug --key-process-delay 150`
+
+### Keys Going to Wrong Applications
+- The service includes multiple safety checks to prevent this
+- If it occurs, user input detection may need tuning
+- Run with debug logging to see protection mechanisms in action
+
+### Performance Issues
+- Use faster timing for responsive systems: `teams-green start --focus-delay 10 --key-process-delay 75`
+- Increase delays for slower systems: `teams-green start --focus-delay 50 --key-process-delay 200`
+
 ### WebSocket Connection Issues
 - Verify the port is not in use: `netstat -an | findstr 8765`
 - Try a different port: `teams-green start --websocket --port 9000`
 - Check Windows Firewall settings
+
+### Fine-Tuning Timing
+
+**If Teams shows pending notifications:**
+```bash
+# Start with conservative delays
+teams-green start --key-process-delay 200
+
+# Gradually reduce if working well
+teams-green start --key-process-delay 150
+```
+
+**If Teams doesn't register the activity:**
+```bash
+# Increase focus delay to ensure Teams processes the focus change
+teams-green start --focus-delay 50 --key-process-delay 150
+```
+
+**For optimal performance:**
+```bash
+# Test different combinations based on your system
+teams-green start --debug --focus-delay 25 --key-process-delay 125
+```
 
 ## License
 

@@ -24,6 +24,35 @@ type Config struct {
 	LogRotate  bool
 	MaxLogSize int // MB
 	MaxLogAge  int // days
+
+	// Teams key sending timing configuration (milliseconds)
+	FocusDelayMs      int // Delay after setting focus before sending key
+	RestoreDelayMs    int // Delay after restoring minimized window
+	KeyProcessDelayMs int // Delay before restoring original focus
+}
+
+// GetFocusDelay returns the focus delay as a time.Duration with fallback to default
+func (cfg *Config) GetFocusDelay() time.Duration {
+	if cfg.FocusDelayMs > 0 {
+		return time.Duration(cfg.FocusDelayMs) * time.Millisecond
+	}
+	return 10 * time.Millisecond // Default value
+}
+
+// GetRestoreDelay returns the restore delay as a time.Duration with fallback to default
+func (cfg *Config) GetRestoreDelay() time.Duration {
+	if cfg.RestoreDelayMs > 0 {
+		return time.Duration(cfg.RestoreDelayMs) * time.Millisecond
+	}
+	return 10 * time.Millisecond // Default value
+}
+
+// GetKeyProcessDelay returns the key process delay as a time.Duration with fallback to default
+func (cfg *Config) GetKeyProcessDelay() time.Duration {
+	if cfg.KeyProcessDelayMs > 0 {
+		return time.Duration(cfg.KeyProcessDelayMs) * time.Millisecond
+	}
+	return 75 * time.Millisecond // Default value
 }
 
 var PidFile string
@@ -268,6 +297,17 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.Interval > 3600 {
 		errors = append(errors, "interval must be no more than 3600 seconds (1 hour)")
+	}
+
+	// Validate timing delays
+	if cfg.FocusDelayMs < 0 || cfg.FocusDelayMs > 1000 {
+		errors = append(errors, "focus delay must be between 0 and 1000 milliseconds")
+	}
+	if cfg.RestoreDelayMs < 0 || cfg.RestoreDelayMs > 1000 {
+		errors = append(errors, "restore delay must be between 0 and 1000 milliseconds")
+	}
+	if cfg.KeyProcessDelayMs < 0 || cfg.KeyProcessDelayMs > 5000 {
+		errors = append(errors, "key process delay must be between 0 and 5000 milliseconds")
 	}
 
 	// Validate port with additional security checks

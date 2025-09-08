@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -32,7 +33,11 @@ var (
 	procShowWindow               = user32.NewProc("ShowWindow")
 	procGetWindowTextLength      = user32.NewProc("GetWindowTextLengthW")
 	procGetWindowText            = user32.NewProc("GetWindowTextW")
+	procGetAsyncKeyState         = user32.NewProc("GetAsyncKeyState")
 )
+
+// ErrUserInputActive is returned when user input is detected during Teams activity
+var ErrUserInputActive = errors.New("user input active, deferring Teams activity")
 
 type WindowEnumContext struct {
 	hwnds            *[]win.HWND
@@ -495,7 +500,90 @@ func (tm *TeamsManager) performFullWindowScan(isFullScan bool) []win.HWND {
 	return hwnds
 }
 
+func isKeyPressed() bool {
+	// Check common keys that might indicate user typing
+	commonKeys := []uintptr{
+		0x08, // VK_BACK
+		0x09, // VK_TAB
+		0x0D, // VK_RETURN
+		0x20, // VK_SPACE
+		0x10, // VK_SHIFT
+		0x11, // VK_CONTROL
+		0x12, // VK_MENU (Alt)
+		0x2E, // VK_DELETE
+		0x24, // VK_HOME
+		0x23, // VK_END
+		0x21, // VK_PRIOR (Page Up)
+		0x22, // VK_NEXT (Page Down)
+		0x25, // VK_LEFT
+		0x26, // VK_UP
+		0x27, // VK_RIGHT
+		0x28, // VK_DOWN
+	}
+
+	for _, key := range commonKeys {
+		ret, _, _ := procGetAsyncKeyState.Call(key)
+		if ret&0x8000 != 0 { // Key is currently pressed
+			return true
+		}
+	}
+
+	// Check A-Z keys
+	for key := uintptr(0x41); key <= 0x5A; key++ {
+		ret, _, _ := procGetAsyncKeyState.Call(key)
+		if ret&0x8000 != 0 {
+			return true
+		}
+	}
+
+	// Check 0-9 keys (main keyboard)
+	for key := uintptr(0x30); key <= 0x39; key++ {
+		ret, _, _ := procGetAsyncKeyState.Call(key)
+		if ret&0x8000 != 0 {
+			return true
+		}
+	}
+
+	// Check numpad keys
+	for key := uintptr(0x60); key <= 0x69; key++ {
+		ret, _, _ := procGetAsyncKeyState.Call(key)
+		if ret&0x8000 != 0 {
+			return true
+		}
+	}
+
+	// Check punctuation and symbol keys
+	punctuationKeys := []uintptr{
+		0xBA, // VK_OEM_1 (;:)
+		0xBB, // VK_OEM_PLUS (=+)
+		0xBC, // VK_OEM_COMMA (,<)
+		0xBD, // VK_OEM_MINUS (-_)
+		0xBE, // VK_OEM_PERIOD (.>)
+		0xBF, // VK_OEM_2 (/?)
+		0xC0, // VK_OEM_3 (`~)
+		0xDB, // VK_OEM_4 ([{)
+		0xDC, // VK_OEM_5 (\|)
+		0xDD, // VK_OEM_6 (]})
+		0xDE, // VK_OEM_7 ('")
+	}
+
+	for _, key := range punctuationKeys {
+		ret, _, _ := procGetAsyncKeyState.Call(key)
+		if ret&0x8000 != 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
+	// Check for user input activity first - real-time keyboard detection only
+	if isKeyPressed() {
+		tm.logger.Debug("User input detected, deferring Teams key send to avoid interference")
+		return ErrUserInputActive
+	}
+
 	hwnds := tm.FindTeamsWindows()
 	if len(hwnds) == 0 {
 		return tm.handleTeamsNotFound(state)
@@ -510,6 +598,11 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 		tm.retryState.BackoffSeconds = 0
 		tm.retryState.ConsecutiveFailures = 0
 	}
+
+	// Get configurable delays
+	focusDelay := tm.config.GetFocusDelay()
+	restoreDelay := tm.config.GetRestoreDelay()
+	keyProcessDelay := tm.config.GetKeyProcessDelay()
 
 	// Store the currently focused window to restore it later
 	currentWindow, _, _ := procGetForegroundWindow.Call()
@@ -528,6 +621,12 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 	var lastError error
 
 	for _, hWnd := range hwnds {
+		// Double-check for user input before each window operation - real-time keyboard detection only
+		if isKeyPressed() {
+			tm.logger.Debug("User input detected during Teams operation, aborting")
+			return ErrUserInputActive
+		}
+
 		// Batch window state queries to reduce syscalls
 		isMinimized, _, _ := procIsIconic.Call(uintptr(hWnd))
 		isMaximized, _, _ := procIsZoomed.Call(uintptr(hWnd))
@@ -537,7 +636,7 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 		if currentFocus == uintptr(hWnd) {
 			// Teams window already has focus, safe to send key
 			if err := sendKeyToWindow(hWnd, vkF15); err != nil {
-				slog.Debug("Failed to send F15 key to focused window",
+				tm.logger.Debug("Failed to send F15 key to focused window",
 					slog.String("error", err.Error()),
 					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 				lastError = err
@@ -554,25 +653,29 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 		if isMinimized != 0 {
 			originalState = swShowMinimized
 			if ret, _, err := procShowWindow.Call(uintptr(hWnd), swRestore); ret == 0 {
-				slog.Debug("Failed to restore minimized window",
+				tm.logger.Debug("Failed to restore minimized window",
 					slog.String("error", err.Error()),
 					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 				lastError = err
 				continue
 			}
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep(restoreDelay)
 		} else if isMaximized != 0 {
 			originalState = swShowMaximized
 		}
 
-		// Focus and send key with validation
+		// Focus and send key with enhanced validation
 		if ret, _, err := procSetForegroundWindow.Call(uintptr(hWnd)); ret != 0 {
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(focusDelay)
 
-			// Verify focus was actually set before sending key
-			if focusedWindow, _, _ := procGetForegroundWindow.Call(); focusedWindow == uintptr(hWnd) {
+			// Double validation: check focus was set and no user input during delay - real-time keyboard detection only
+			if isKeyPressed() {
+				tm.logger.Debug("User input detected during focus change, aborting key send")
+				lastError = ErrUserInputActive
+			} else if focusedWindow, _, _ := procGetForegroundWindow.Call(); focusedWindow == uintptr(hWnd) {
+				// Final validation before sending key
 				if err := sendKeyToWindow(hWnd, vkF15); err != nil {
-					slog.Debug("Failed to send F15 key",
+					tm.logger.Debug("Failed to send F15 key",
 						slog.String("error", err.Error()),
 						slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 					lastError = err
@@ -580,15 +683,23 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 					successCount++
 					tm.logger.Debug("Sent F15 to newly focused Teams window",
 						slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+
+					// Post-send validation - verify focus didn't change unexpectedly
+					time.Sleep(5 * time.Millisecond)
+					if verifyWindow, _, _ := procGetForegroundWindow.Call(); verifyWindow != uintptr(hWnd) {
+						tm.logger.Debug("Focus changed after key send - possible interference",
+							slog.Uint64("expected", uint64(uintptr(hWnd))),
+							slog.Uint64("actual", uint64(verifyWindow)))
+					}
 				}
 			} else {
-				slog.Debug("Focus validation failed - skipping key send to prevent leakage",
+				tm.logger.Debug("Focus validation failed - skipping key send to prevent leakage",
 					slog.Uint64("expected_hwnd", uint64(uintptr(hWnd))),
 					slog.Uint64("actual_focused", uint64(focusedWindow)))
 				lastError = fmt.Errorf("focus validation failed")
 			}
 		} else {
-			slog.Debug("Failed to set foreground window",
+			tm.logger.Debug("Failed to set foreground window",
 				slog.String("error", err.Error()),
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 			lastError = err
@@ -597,7 +708,7 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 		// Restore original window state if needed
 		if originalState != swShowNormal {
 			if ret, _, err := procShowWindow.Call(uintptr(hWnd), uintptr(originalState)); ret == 0 {
-				slog.Debug("Failed to restore window state",
+				tm.logger.Debug("Failed to restore window state",
 					slog.String("error", err.Error()),
 					slog.Int("state", originalState),
 					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
@@ -605,14 +716,14 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 		}
 	}
 
-	// Minimal delay before restoring focus to ensure key event is processed by Teams
-	time.Sleep(5 * time.Millisecond)
+	// Configurable delay before restoring focus to ensure key event is processed by Teams
+	time.Sleep(keyProcessDelay)
 
 	// Restore focus to original window
 	if currentWindow != 0 {
 		ret, _, err := procSetForegroundWindow.Call(currentWindow)
 		if ret == 0 {
-			slog.Debug("Failed to restore focus to original window",
+			tm.logger.Debug("Failed to restore focus to original window",
 				slog.String("error", err.Error()),
 				slog.Uint64("hwnd", uint64(currentWindow)))
 		}
@@ -622,7 +733,10 @@ func (tm *TeamsManager) SendKeysToTeams(state *websocket.ServiceState) error {
 		tm.logger.Debug("Sent keys to Teams windows",
 			slog.String("keys", "F15"),
 			slog.Int("window_count", successCount),
-			slog.Int("total_windows", len(hwnds)))
+			slog.Int("total_windows", len(hwnds)),
+			slog.Duration("focus_delay", focusDelay),
+			slog.Duration("restore_delay", restoreDelay),
+			slog.Duration("key_process_delay", keyProcessDelay))
 		return nil
 	}
 

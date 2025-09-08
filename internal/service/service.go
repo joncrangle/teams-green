@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -67,6 +68,7 @@ type TeamsManager struct {
 	retryState  *RetryState
 	logger      *slog.Logger
 	enumContext *WindowEnumContext
+	config      *config.Config
 }
 
 func NewService(cfg *config.Config) *Service {
@@ -101,6 +103,7 @@ func NewService(cfg *config.Config) *Service {
 			MaxBackoff: 300, // 5 minutes max
 		},
 		logger: logger,
+		config: cfg,
 	}
 
 	return &Service{
@@ -170,32 +173,37 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 
 			// Attempt Teams activity with error recovery
 			if err := s.safeTeamsActivity(); err != nil {
-				teamsMissingCount++
-				s.state.Mutex.Lock()
-				s.state.FailureStreak++
-				s.state.Mutex.Unlock()
+				// Check if this is user input deferral (not an actual failure)
+				if !errors.Is(err, ErrUserInputActive) {
+					// This is an actual failure
+					teamsMissingCount++
+					s.state.Mutex.Lock()
+					s.state.FailureStreak++
+					s.state.Mutex.Unlock()
 
-				if teamsMissingCount <= maxMissingLogs {
-					s.logger.Warn("Teams activity failed",
-						slog.String("error", err.Error()),
-						slog.Int("missing_count", teamsMissingCount),
-						slog.Int("failure_streak", s.state.FailureStreak))
-					if s.config.WebSocket {
-						websocket.Broadcast(&websocket.Event{
-							Service: "teams-green",
-							Status:  "warning",
-							PID:     s.state.PID,
-							Message: err.Error(),
-						}, s.state)
+					if teamsMissingCount <= maxMissingLogs {
+						s.logger.Warn("Teams activity failed",
+							slog.String("error", err.Error()),
+							slog.Int("missing_count", teamsMissingCount),
+							slog.Int("failure_streak", s.state.FailureStreak))
+						if s.config.WebSocket {
+							websocket.Broadcast(&websocket.Event{
+								Service: "teams-green",
+								Status:  "warning",
+								PID:     s.state.PID,
+								Message: err.Error(),
+							}, s.state)
+						}
+					}
+
+					// Implement exponential backoff for excessive failures
+					if s.state.FailureStreak > 10 {
+						backoffDuration := time.Duration(min(s.state.FailureStreak*2, 60)) * time.Second
+						s.logger.Info("Applying failure backoff", slog.Duration("duration", backoffDuration))
+						time.Sleep(backoffDuration)
 					}
 				}
-
-				// Implement exponential backoff for excessive failures
-				if s.state.FailureStreak > 10 {
-					backoffDuration := time.Duration(min(s.state.FailureStreak*2, 60)) * time.Second
-					s.logger.Info("Applying failure backoff", slog.Duration("duration", backoffDuration))
-					time.Sleep(backoffDuration)
-				}
+				// If it's user input deferral, we just skip the success handling and continue the loop
 			} else {
 				// Success - update activity tracking
 				s.state.Mutex.Lock()

@@ -152,38 +152,36 @@ var runCmd = &cobra.Command{
 	},
 }
 
+// addConfigFlags adds all configuration flags to a command
+func addConfigFlags(cmd *cobra.Command, includeShortcuts bool) {
+	if includeShortcuts {
+		cmd.Flags().BoolVarP(&cfg.Debug, "debug", "d", false, "Run in foreground with debug logging")
+		cmd.Flags().IntVarP(&cfg.Interval, "interval", "i", 180, "Loop interval in seconds")
+		cmd.Flags().BoolVarP(&cfg.WebSocket, "websocket", "w", false, "Enable WebSocket server")
+		cmd.Flags().IntVarP(&cfg.Port, "port", "p", 8765, "WebSocket server port")
+	} else {
+		cmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Debug mode")
+		cmd.Flags().IntVar(&cfg.Interval, "interval", 180, "Loop interval in seconds")
+		cmd.Flags().BoolVar(&cfg.WebSocket, "websocket", false, "Enable WebSocket server")
+		cmd.Flags().IntVar(&cfg.Port, "port", 8765, "WebSocket server port")
+	}
+
+	// Common flags for all commands
+	cmd.Flags().StringVar(&cfg.LogFormat, "log-format", "text", "Log format (text or json)")
+	cmd.Flags().StringVar(&cfg.LogFile, "log-file", "", "Log file path (empty for no file logging)")
+	cmd.Flags().BoolVar(&cfg.LogRotate, "log-rotate", false, "Enable log file rotation")
+	cmd.Flags().IntVar(&cfg.MaxLogSize, "max-log-size", 10, "Maximum log file size in MB")
+	cmd.Flags().IntVar(&cfg.MaxLogAge, "max-log-age", 30, "Maximum log file age in days")
+	cmd.Flags().IntVar(&cfg.FocusDelayMs, "focus-delay", 20, "Delay after setting focus before sending key (milliseconds)")
+	cmd.Flags().IntVar(&cfg.RestoreDelayMs, "restore-delay", 20, "Delay after restoring minimized window (milliseconds)")
+	cmd.Flags().IntVar(&cfg.KeyProcessDelayMs, "key-process-delay", 75, "Delay before restoring original focus (milliseconds)")
+}
+
 func init() {
-	// Add flags to commands
-	startCmd.Flags().BoolVarP(&cfg.Debug, "debug", "d", false, "Run in foreground with debug logging")
-	startCmd.Flags().IntVarP(&cfg.Interval, "interval", "i", 180, "Loop interval in seconds")
-	startCmd.Flags().BoolVarP(&cfg.WebSocket, "websocket", "w", false, "Enable WebSocket server")
-	startCmd.Flags().IntVarP(&cfg.Port, "port", "p", 8765, "WebSocket server port")
-	startCmd.Flags().StringVar(&cfg.LogFormat, "log-format", "text", "Log format (text or json)")
-	startCmd.Flags().StringVar(&cfg.LogFile, "log-file", "", "Log file path (empty for no file logging)")
-	startCmd.Flags().BoolVar(&cfg.LogRotate, "log-rotate", false, "Enable log file rotation")
-	startCmd.Flags().IntVar(&cfg.MaxLogSize, "max-log-size", 10, "Maximum log file size in MB")
-	startCmd.Flags().IntVar(&cfg.MaxLogAge, "max-log-age", 30, "Maximum log file age in days")
-
-	toggleCmd.Flags().BoolVarP(&cfg.Debug, "debug", "d", false, "Run in foreground with debug logging")
-	toggleCmd.Flags().IntVarP(&cfg.Interval, "interval", "i", 180, "Loop interval in seconds")
-	toggleCmd.Flags().BoolVarP(&cfg.WebSocket, "websocket", "w", false, "Enable WebSocket server")
-	toggleCmd.Flags().IntVarP(&cfg.Port, "port", "p", 8765, "WebSocket server port")
-	toggleCmd.Flags().StringVar(&cfg.LogFormat, "log-format", "text", "Log format (text or json)")
-	toggleCmd.Flags().StringVar(&cfg.LogFile, "log-file", "", "Log file path (empty for no file logging)")
-	toggleCmd.Flags().BoolVar(&cfg.LogRotate, "log-rotate", false, "Enable log file rotation")
-	toggleCmd.Flags().IntVar(&cfg.MaxLogSize, "max-log-size", 10, "Maximum log file size in MB")
-	toggleCmd.Flags().IntVar(&cfg.MaxLogAge, "max-log-age", 30, "Maximum log file age in days")
-
-	// Hidden flags for run command
-	runCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Debug mode")
-	runCmd.Flags().IntVar(&cfg.Interval, "interval", 180, "Loop interval in seconds")
-	runCmd.Flags().BoolVar(&cfg.WebSocket, "websocket", false, "Enable WebSocket server")
-	runCmd.Flags().IntVar(&cfg.Port, "port", 8765, "WebSocket server port")
-	runCmd.Flags().StringVar(&cfg.LogFormat, "log-format", "text", "Log format (text or json)")
-	runCmd.Flags().StringVar(&cfg.LogFile, "log-file", "", "Log file path (empty for no file logging)")
-	runCmd.Flags().BoolVar(&cfg.LogRotate, "log-rotate", false, "Enable log file rotation")
-	runCmd.Flags().IntVar(&cfg.MaxLogSize, "max-log-size", 10, "Maximum log file size in MB")
-	runCmd.Flags().IntVar(&cfg.MaxLogAge, "max-log-age", 30, "Maximum log file age in days")
+	// Add flags to commands using helper function
+	addConfigFlags(startCmd, true)  // Include shortcuts for user-facing commands
+	addConfigFlags(toggleCmd, true) // Include shortcuts for user-facing commands
+	addConfigFlags(runCmd, false)   // No shortcuts for internal command
 
 	// Add commands to root
 	rootCmd.AddCommand(startCmd)

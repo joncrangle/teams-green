@@ -355,3 +355,65 @@ func TestPidFileInitialization(t *testing.T) {
 		t.Errorf("PidFile should end with teams-green.pid, got %s", PidFile)
 	}
 }
+
+func TestDelayMethods(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   Config
+		expected map[string]time.Duration
+	}{
+		{
+			name: "default values when config is zero",
+			config: Config{
+				FocusDelayMs:      0,
+				RestoreDelayMs:    0,
+				KeyProcessDelayMs: 0,
+			},
+			expected: map[string]time.Duration{
+				"focus":      10 * time.Millisecond,
+				"restore":    10 * time.Millisecond,
+				"keyprocess": 75 * time.Millisecond,
+			},
+		},
+		{
+			name: "custom values when config is set",
+			config: Config{
+				FocusDelayMs:      25,
+				RestoreDelayMs:    50,
+				KeyProcessDelayMs: 150,
+			},
+			expected: map[string]time.Duration{
+				"focus":      25 * time.Millisecond,
+				"restore":    50 * time.Millisecond,
+				"keyprocess": 150 * time.Millisecond,
+			},
+		},
+		{
+			name: "mixed default and custom values",
+			config: Config{
+				FocusDelayMs:      30,
+				RestoreDelayMs:    0, // Should use default
+				KeyProcessDelayMs: 200,
+			},
+			expected: map[string]time.Duration{
+				"focus":      30 * time.Millisecond,
+				"restore":    10 * time.Millisecond, // Default
+				"keyprocess": 200 * time.Millisecond,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.config.GetFocusDelay(); got != tt.expected["focus"] {
+				t.Errorf("GetFocusDelay() = %v, expected %v", got, tt.expected["focus"])
+			}
+			if got := tt.config.GetRestoreDelay(); got != tt.expected["restore"] {
+				t.Errorf("GetRestoreDelay() = %v, expected %v", got, tt.expected["restore"])
+			}
+			if got := tt.config.GetKeyProcessDelay(); got != tt.expected["keyprocess"] {
+				t.Errorf("GetKeyProcessDelay() = %v, expected %v", got, tt.expected["keyprocess"])
+			}
+		})
+	}
+}

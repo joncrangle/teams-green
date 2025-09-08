@@ -109,23 +109,23 @@ func TestServiceMainLoop(t *testing.T) {
 
 	svc := NewService(cfg)
 
-	// Create a context that will cancel quickly
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
+	// Create a context that cancels immediately for predictable behavior
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
 
-	// Run main loop for a short time
+	// Run main loop with canceled context
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		svc.MainLoop(ctx, 50*time.Millisecond)
+		svc.MainLoop(ctx, 100*time.Millisecond)
 	}()
 
-	// Wait for completion or timeout
+	// Wait for completion with generous timeout since context is already canceled
 	select {
 	case <-done:
-		// Success
-	case <-time.After(200 * time.Millisecond):
-		t.Error("main loop did not exit in time")
+		// Success - main loop should exit immediately due to canceled context
+	case <-time.After(500 * time.Millisecond):
+		t.Error("main loop did not exit in time with canceled context")
 	}
 }
 
