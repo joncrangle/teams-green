@@ -113,12 +113,12 @@ The service accepts the following flags:
 | `--interval`          | `-i`  | `180`   | Activity interval in seconds                      |
 | `--websocket`         | `-w`  | `false` | Enable WebSocket server                           |
 | `--port`              | `-p`  | `8765`  | WebSocket server port                             |
-| `--focus-delay`       |       | `20`    | Delay after setting focus before sending key (ms) |
-| `--restore-delay`     |       | `20`    | Delay after restoring minimized window (ms)       |
+| `--focus-delay`       |       | `100`    | Delay after setting focus before sending key (ms) |
+| `--restore-delay`     |       | `50`    | Delay after restoring minimized window (ms)       |
 | `--key-process-delay` |       | `75`   | Delay before restoring original focus (ms)        |
 | `--log-format`        |       | `text`  | Log format: text or json                          |
 | `--log-file`          |       | ``      | Log file path (empty = no file logging)           |
-| `--log-rotate`        |       | `false` | Enable log rotation                               |
+| `--log-rotate`        |       | `falsmse` | Enable log rotation                               |
 | `--max-log-size`      |       | `10`    | Maximum log file size in MB                       |
 | `--max-log-age`       |       | `30`    | Maximum log file age in days                      |
 

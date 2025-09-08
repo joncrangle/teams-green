@@ -164,6 +164,8 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 	for {
 		select {
 		case <-ticker.C:
+			s.logger.Debug("Main loop tick")
+
 			// Periodic health check
 			now := time.Now()
 			if now.Sub(lastHealthCheck) >= healthCheckInterval {
@@ -208,7 +210,8 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 				// Success - update activity tracking
 				s.state.Mutex.Lock()
 				s.state.LastActivity = time.Now()
-				s.state.TeamsWindowCount = len(s.teamsMgr.FindTeamsWindows())
+				// Avoid duplicate window enumeration - if SendKeysToTeams succeeded, at least 1 window exists
+				s.state.TeamsWindowCount = 1
 				if s.state.FailureStreak > 0 {
 					s.logger.Info("Teams activity resumed",
 						slog.Int("was_failure_streak", s.state.FailureStreak),
