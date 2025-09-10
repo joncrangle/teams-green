@@ -67,11 +67,13 @@ type Service struct {
 }
 
 type TeamsManager struct {
-	windowCache *WindowCache
-	retryState  *RetryState
-	logger      *slog.Logger
-	enumContext *WindowEnumContext
-	config      *config.Config
+	windowCache     *WindowCache
+	retryState      *RetryState
+	logger          *slog.Logger
+	enumContext     *WindowEnumContext
+	config          *config.Config
+	lastInputCheck  time.Time
+	inputCheckMutex sync.RWMutex
 }
 
 func NewService(cfg *config.Config) *Service {
@@ -296,19 +298,9 @@ func (s *Service) safeTeamsActivity(ctx context.Context) (err error) {
 }
 
 func (s *Service) checkUserActivity() bool {
-	// Only check for user activity periodically to avoid excessive API calls
-	s.activityCheckMutex.RLock()
-	lastCheck := s.lastUserActivity
-	s.activityCheckMutex.RUnlock()
-
-	// Only check again if it's been at least 1 second since last check
-	now := time.Now()
-	if now.Sub(lastCheck) < time.Second {
-		return false
-	}
-
-	// Check for active input
+	// Check for active input without throttling to ensure accurate detection
 	if s.teamsMgr.isUserInputActive() {
+		now := time.Now()
 		s.activityCheckMutex.Lock()
 		s.lastUserActivity = now
 		s.nextTeamsActivity = now.Add(time.Duration(s.config.Interval) * time.Second)

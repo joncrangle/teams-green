@@ -325,6 +325,22 @@ func silentSetForegroundWindow(hWnd win.HWND) error {
 }
 
 func (tm *TeamsManager) isUserInputActive() bool {
+	// Throttle input checks to avoid excessive API calls
+	tm.inputCheckMutex.RLock()
+	lastCheck := tm.lastInputCheck
+	tm.inputCheckMutex.RUnlock()
+
+	now := time.Now()
+	// Only check every 500ms to balance accuracy with performance
+	if now.Sub(lastCheck) < 500*time.Millisecond {
+		return false // Return false when throttled - assume no activity
+	}
+
+	// Update last check time
+	tm.inputCheckMutex.Lock()
+	tm.lastInputCheck = now
+	tm.inputCheckMutex.Unlock()
+
 	// Check for real-time input activity
 	if isKeyPressed() {
 		tm.logger.Debug("User keyboard input detected")
