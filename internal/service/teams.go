@@ -33,6 +33,8 @@ var (
 	procAllowSetForegroundWindow = user32.NewProc("AllowSetForegroundWindow")
 	procAttachThreadInput        = user32.NewProc("AttachThreadInput")
 	procGetCurrentThreadID       = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThreadId")
+	procGetWindowLong            = user32.NewProc("GetWindowLongW")
+	procGetClassName             = user32.NewProc("GetClassNameW")
 )
 
 // ErrUserInputActive is returned when user input is detected during Teams activity
@@ -258,6 +260,76 @@ func isKeyPressed() bool {
 	return false
 }
 
+func (tm *TeamsManager) isPIPWindow(hWnd win.HWND) bool {
+	const (
+		gwlExstyle     = uintptr(0xFFFFFFEC) // -20 as unsigned
+		wsExTopmost    = 0x00000008
+		wsExToolwindow = 0x00000080
+	)
+
+	// Check if window has topmost attribute (common for PIP windows)
+	exStyle, _, _ := procGetWindowLong.Call(uintptr(hWnd), gwlExstyle)
+	if exStyle&wsExTopmost != 0 {
+		// Get window class name to check for known PIP window classes
+		var className [256]uint16
+		length, _, _ := procGetClassName.Call(uintptr(hWnd), uintptr(unsafe.Pointer(&className[0])), 256)
+		if length > 0 {
+			classStr := windows.UTF16ToString(className[:length])
+
+			// Known PIP window class patterns
+			pipClasses := []string{
+				"PictureInPictureWindow",
+				"Chrome_WidgetWin_0",     // Chrome PIP
+				"MicrosoftEdgeWidgetWin", // Edge PIP
+				"Mozilla",                // Firefox PIP
+				"Picture.in.Picture",     // Zen PIP
+				"VideoOverlayWindow",
+				"FloatingWindow",
+			}
+
+			for _, pipClass := range pipClasses {
+				if strings.Contains(classStr, pipClass) {
+					tm.logger.Debug("Detected PIP window",
+						slog.String("class", classStr),
+						slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+					return true
+				}
+			}
+		}
+
+		// Additional check: very small windows that are topmost might be PIP
+		// This catches cases where class name detection fails
+		if exStyle&wsExToolwindow == 0 { // Not a tool window
+			return true // Likely a PIP window
+		}
+	}
+
+	return false
+}
+
+func (tm *TeamsManager) shouldRestoreFocus(hWnd win.HWND) bool {
+	if hWnd == 0 {
+		return false
+	}
+
+	// Don't restore focus to PIP windows as they can cause focus conflicts
+	if tm.isPIPWindow(hWnd) {
+		tm.logger.Debug("Skipping focus restoration to PIP window",
+			slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+		return false
+	}
+
+	// Check if window is still visible and valid
+	ret, _, _ := procIsWindowVisible.Call(uintptr(hWnd))
+	if ret == 0 {
+		tm.logger.Debug("Skipping focus restoration to invisible window",
+			slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+		return false
+	}
+
+	return true
+}
+
 func (tm *TeamsManager) isUserInputActive() bool {
 	// Use the most reliable method: GetLastInputInfo
 	// This catches ALL input - keyboard, mouse movement, clicks, scrolling, etc.
@@ -415,12 +487,15 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 	// Configurable delay before restoring focus to ensure key event is processed by Teams
 	time.Sleep(keyProcessDelay)
 
-	// Restore focus to original window
-	if currentWindow != 0 {
+	// Restore focus to original window, but only if it's safe to do so
+	if tm.shouldRestoreFocus(win.HWND(currentWindow)) {
 		ret, _, err := procSetForegroundWindow.Call(currentWindow)
 		if ret == 0 {
 			tm.logger.Debug("Failed to restore focus to original window",
 				slog.String("error", err.Error()),
+				slog.Uint64("hwnd", uint64(currentWindow)))
+		} else {
+			tm.logger.Debug("Successfully restored focus to original window",
 				slog.Uint64("hwnd", uint64(currentWindow)))
 		}
 	}
