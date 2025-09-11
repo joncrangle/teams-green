@@ -150,15 +150,21 @@ func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
 	)
 	if ret == 0 {
 		tm.logger.Debug("EnumWindows failed", slog.String("error", err.Error()))
+		// Ensure we always return a valid slice, never nil
+		return make([]win.HWND, 0)
 	}
 
+	// Ensure we always return a valid slice, never nil
+	if hwnds == nil {
+		return make([]win.HWND, 0)
+	}
 	return hwnds
 }
 
 func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 	const (
 		maxRetries = 3
-		retryDelay = 25 * time.Millisecond
+		retryDelay = 50 * time.Millisecond
 	)
 
 	// First, check if window already has focus
@@ -174,50 +180,54 @@ func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 
 	for attempt := range maxRetries {
 		// Allow the target process to set foreground window
-		if ret, _, _ := procAllowSetForegroundWindow.Call(uintptr(targetPID)); ret == 0 {
-			tm.logger.Debug("AllowSetForegroundWindow failed",
+		allowRet, _, _ := procAllowSetForegroundWindow.Call(uintptr(targetPID))
+		if allowRet == 0 {
+			tm.logger.Debug("AllowSetForegroundWindow failed (expected on restricted systems)",
 				slog.Uint64("pid", uint64(targetPID)))
 		}
 
 		// Bring window to top first
-		if ret, _, _ := procBringWindowToTop.Call(uintptr(hWnd)); ret == 0 {
+		bringRet, _, _ := procBringWindowToTop.Call(uintptr(hWnd))
+		if bringRet == 0 {
 			tm.logger.Debug("BringWindowToTop failed",
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(15 * time.Millisecond)
 
 		// Try normal SetForegroundWindow first
-		ret, _, err := procSetForegroundWindow.Call(uintptr(hWnd))
-		if ret != 0 {
-			// Check if focus was actually set
-			time.Sleep(20 * time.Millisecond)
-			focusedWindow, _, _ := procGetForegroundWindow.Call()
-			if focusedWindow == uintptr(hWnd) {
-				tm.logger.Debug("Focus set successfully with SetForegroundWindow",
-					slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-					slog.Int("attempt", attempt+1))
-				return nil
-			}
+		setFgRet, _, setFgErr := procSetForegroundWindow.Call(uintptr(hWnd))
+
+		// Give Windows time to process the focus change
+		time.Sleep(30 * time.Millisecond)
+
+		// Always check if focus was actually set, regardless of return value
+		focusedWindow, _, _ := procGetForegroundWindow.Call()
+		if focusedWindow == uintptr(hWnd) {
+			tm.logger.Debug("Focus set successfully with SetForegroundWindow",
+				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+				slog.Int("attempt", attempt+1))
+			return nil
 		}
 
-		// SetForegroundWindow failed or didn't actually set focus
-		// Try AttachThreadInput approach as fallback
+		// If direct approach failed, try AttachThreadInput as fallback
 		if targetThreadID != currentThreadID {
 			// Attach our thread input to the target window's thread
-			if ret, _, _ := procAttachThreadInput.Call(currentThreadID, targetThreadID, 1); ret != 0 {
+			attachRet, _, _ := procAttachThreadInput.Call(currentThreadID, targetThreadID, 1)
+			if attachRet != 0 {
 				// Now try to set focus with attached threads
-				ret, _, _ := procSetForegroundWindow.Call(uintptr(hWnd))
+				attachSetRet, _, _ := procSetForegroundWindow.Call(uintptr(hWnd))
 
-				// Detach threads immediately
-				if ret, _, _ := procAttachThreadInput.Call(currentThreadID, targetThreadID, 0); ret == 0 {
+				// Always detach threads, even if focus setting failed
+				detachRet, _, _ := procAttachThreadInput.Call(currentThreadID, targetThreadID, 0)
+				if detachRet == 0 {
 					tm.logger.Debug("Failed to detach thread input",
 						slog.Uint64("current_thread", uint64(currentThreadID)),
 						slog.Uint64("target_thread", uint64(targetThreadID)))
 				}
 
-				if ret != 0 {
+				if attachSetRet != 0 {
 					// Verify focus was set
-					time.Sleep(20 * time.Millisecond)
+					time.Sleep(30 * time.Millisecond)
 					focusedWindow, _, _ := procGetForegroundWindow.Call()
 					if focusedWindow == uintptr(hWnd) {
 						tm.logger.Debug("Focus set successfully with AttachThreadInput",
@@ -226,17 +236,33 @@ func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 						return nil
 					}
 				}
+			} else {
+				tm.logger.Debug("Failed to attach thread input",
+					slog.Uint64("current_thread", uint64(currentThreadID)),
+					slog.Uint64("target_thread", uint64(targetThreadID)))
 			}
 		}
 
-		// Log failure and retry if not last attempt
+		// Log failure details for debugging, but only if not last attempt
 		if attempt < maxRetries-1 {
 			tm.logger.Debug("Focus attempt failed, retrying",
-				slog.String("error", err.Error()),
+				slog.String("setfg_error", setFgErr.Error()),
+				slog.Bool("setfg_success", setFgRet != 0),
+				slog.Bool("allow_success", allowRet != 0),
+				slog.Bool("bring_success", bringRet != 0),
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+				slog.Uint64("current_focus", uint64(focusedWindow)),
 				slog.Int("attempt", attempt+1))
 			time.Sleep(retryDelay)
 		}
+	}
+
+	// Final attempt: sometimes focus works on the last try even if API calls fail
+	finalFocus, _, _ := procGetForegroundWindow.Call()
+	if finalFocus == uintptr(hWnd) {
+		tm.logger.Debug("Focus was set despite API failures",
+			slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+		return nil
 	}
 
 	return fmt.Errorf("failed to set focus after %d attempts", maxRetries)
@@ -444,12 +470,28 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 		}
 
 		// Try to set focus using our robust focus function
-		if err := tm.setWindowFocus(hWnd); err != nil {
-			tm.logger.Debug("Failed to set focus",
-				slog.String("error", err.Error()),
+		focusErr := tm.setWindowFocus(hWnd)
+		if focusErr != nil {
+			tm.logger.Debug("Focus setting failed, attempting key send anyway",
+				slog.String("focus_error", focusErr.Error()),
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
-			lastError = err
-			continue
+
+			// Even if focus failed, try sending the key - sometimes it still works
+			// This is a fallback for when Windows security restrictions prevent focus changes
+			if err := sendKeyToWindow(hWnd, vkF15); err != nil {
+				tm.logger.Debug("Key send also failed without focus",
+					slog.String("key_error", err.Error()),
+					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+				lastError = fmt.Errorf("focus failed: %v, key send failed: %v", focusErr, err)
+			} else {
+				// Key was sent successfully even without focus
+				successCount++
+				tm.logger.Debug("Successfully sent F15 without focus (background mode)",
+					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+			}
+
+			// Continue to next window
+			goto restoreState
 		}
 
 		// Focus was set successfully, now send the key
@@ -473,6 +515,7 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 			}
 		}
 
+	restoreState:
 		// Restore original window state if needed
 		if originalState != swShowNormal {
 			if ret, _, err := procShowWindow.Call(uintptr(hWnd), uintptr(originalState)); ret == 0 {
