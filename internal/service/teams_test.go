@@ -132,8 +132,19 @@ func TestTeamsManagerFindTeamsWindows(t *testing.T) {
 
 	result := tm.FindTeamsWindows()
 
+	// The function should never return nil - it should return an empty slice if no Teams found
 	if result == nil {
-		t.Error("FindTeamsWindows() returned nil")
+		t.Fatal("FindTeamsWindows() returned nil, expected empty slice")
+	}
+
+	// Log the result for debugging
+	t.Logf("Found %d Teams windows", len(result))
+
+	// Verify it's actually a valid slice
+	if len(result) == 0 {
+		t.Log("No Teams windows found (expected in CI)")
+	} else {
+		t.Log("Teams windows found")
 	}
 }
 
