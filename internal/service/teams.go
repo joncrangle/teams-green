@@ -29,6 +29,8 @@ var (
 	procIsZoomed                 = user32.NewProc("IsZoomed")
 	procShowWindow               = user32.NewProc("ShowWindow")
 	procGetAsyncKeyState         = user32.NewProc("GetAsyncKeyState")
+	procBringWindowToTop         = user32.NewProc("BringWindowToTop")
+	procAllowSetForegroundWindow = user32.NewProc("AllowSetForegroundWindow")
 	procAttachThreadInput        = user32.NewProc("AttachThreadInput")
 	procGetCurrentThreadID       = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThreadId")
 )
@@ -151,6 +153,93 @@ func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
 	return hwnds
 }
 
+func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
+	const (
+		maxRetries = 3
+		retryDelay = 25 * time.Millisecond
+	)
+
+	// First, check if window already has focus
+	currentFocus, _, _ := procGetForegroundWindow.Call()
+	if currentFocus == uintptr(hWnd) {
+		return nil
+	}
+
+	// Get thread IDs for AttachThreadInput fallback
+	var targetPID uint32
+	targetThreadID, _, _ := procGetWindowThreadProcessID.Call(uintptr(hWnd), uintptr(unsafe.Pointer(&targetPID)))
+	currentThreadID, _, _ := procGetCurrentThreadID.Call()
+
+	for attempt := range maxRetries {
+		// Allow the target process to set foreground window
+		if ret, _, _ := procAllowSetForegroundWindow.Call(uintptr(targetPID)); ret == 0 {
+			tm.logger.Debug("AllowSetForegroundWindow failed",
+				slog.Uint64("pid", uint64(targetPID)))
+		}
+
+		// Bring window to top first
+		if ret, _, _ := procBringWindowToTop.Call(uintptr(hWnd)); ret == 0 {
+			tm.logger.Debug("BringWindowToTop failed",
+				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+		}
+		time.Sleep(10 * time.Millisecond)
+
+		// Try normal SetForegroundWindow first
+		ret, _, err := procSetForegroundWindow.Call(uintptr(hWnd))
+		if ret != 0 {
+			// Check if focus was actually set
+			time.Sleep(20 * time.Millisecond)
+			focusedWindow, _, _ := procGetForegroundWindow.Call()
+			if focusedWindow == uintptr(hWnd) {
+				tm.logger.Debug("Focus set successfully with SetForegroundWindow",
+					slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+					slog.Int("attempt", attempt+1))
+				return nil
+			}
+		}
+
+		// SetForegroundWindow failed or didn't actually set focus
+		// Try AttachThreadInput approach as fallback
+		if targetThreadID != currentThreadID {
+			// Attach our thread input to the target window's thread
+			if ret, _, _ := procAttachThreadInput.Call(currentThreadID, targetThreadID, 1); ret != 0 {
+				// Now try to set focus with attached threads
+				ret, _, _ := procSetForegroundWindow.Call(uintptr(hWnd))
+
+				// Detach threads immediately
+				if ret, _, _ := procAttachThreadInput.Call(currentThreadID, targetThreadID, 0); ret == 0 {
+					tm.logger.Debug("Failed to detach thread input",
+						slog.Uint64("current_thread", uint64(currentThreadID)),
+						slog.Uint64("target_thread", uint64(targetThreadID)))
+				}
+
+				if ret != 0 {
+					// Verify focus was set
+					time.Sleep(20 * time.Millisecond)
+					focusedWindow, _, _ := procGetForegroundWindow.Call()
+					if focusedWindow == uintptr(hWnd) {
+						tm.logger.Debug("Focus set successfully with AttachThreadInput",
+							slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+							slog.Int("attempt", attempt+1))
+						return nil
+					}
+				}
+			}
+		}
+
+		// Log failure and retry if not last attempt
+		if attempt < maxRetries-1 {
+			tm.logger.Debug("Focus attempt failed, retrying",
+				slog.String("error", err.Error()),
+				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+				slog.Int("attempt", attempt+1))
+			time.Sleep(retryDelay)
+		}
+	}
+
+	return fmt.Errorf("failed to set focus after %d attempts", maxRetries)
+}
+
 func isKeyPressed() bool {
 	// Simplified check for just modifier keys to minimize API calls
 	modifierKeys := []uintptr{
@@ -169,96 +258,9 @@ func isKeyPressed() bool {
 	return false
 }
 
-func isMousePressed() bool {
-	// Check mouse buttons using GetAsyncKeyState
-	mouseButtons := []uintptr{
-		0x01, // VK_LBUTTON (Left mouse button)
-		0x02, // VK_RBUTTON (Right mouse button)
-		0x04, // VK_MBUTTON (Middle mouse button)
-		0x05, // VK_XBUTTON1 (X1 mouse button)
-		0x06, // VK_XBUTTON2 (X2 mouse button)
-	}
-
-	for _, button := range mouseButtons {
-		ret, _, _ := procGetAsyncKeyState.Call(button)
-		if ret&0x8000 != 0 {
-			return true
-		}
-	}
-
-	return false
-}
-
-// isUserActivelyUsing checks if the user is actively using another application
-func isUserActivelyUsing() bool {
-	// Get the foreground window
-	foregroundWindow, _, _ := procGetForegroundWindow.Call()
-	if foregroundWindow == 0 {
-		return false
-	}
-
-	// Get the process ID of the foreground window
-	var pid uint32
-	_, _, _ = procGetWindowThreadProcessID.Call(foregroundWindow, uintptr(unsafe.Pointer(&pid)))
-	if pid == 0 {
-		return false
-	}
-
-	// Open process to get executable name
-	hProcess, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-	if err != nil || hProcess == 0 {
-		return false
-	}
-	defer func() {
-		_ = windows.CloseHandle(hProcess)
-	}()
-
-	var exeName [windows.MAX_PATH]uint16
-	size := uint32(len(exeName))
-	if err := windows.QueryFullProcessImageName(hProcess, 0, &exeName[0], &size); err != nil {
-		return false
-	}
-
-	// Extract base executable name
-	exePath := windows.UTF16ToString(exeName[:size])
-	lastSlash := strings.LastIndexByte(exePath, '\\')
-	var exeBase string
-	if lastSlash != -1 {
-		exeBase = strings.ToLower(exePath[lastSlash+1:])
-	} else {
-		exeBase = strings.ToLower(exePath)
-	}
-
-	// Check if the foreground application is Teams
-	teamsExecutables := getTeamsExecutables()
-	isTeams := slices.Contains(teamsExecutables, exeBase)
-
-	if isTeams {
-		return false // User is using Teams, not another app
-	}
-
-	// Check if it's a system/background process that we should ignore
-	systemProcesses := []string{
-		"dwm.exe",         // Desktop Window Manager
-		"explorer.exe",    // Windows Explorer (desktop)
-		"winlogon.exe",    // Windows Logon
-		"csrss.exe",       // Client/Server Runtime
-		"wininit.exe",     // Windows Start-Up Application
-		"services.exe",    // Service Control Manager
-		"lsass.exe",       // Local Security Authority
-		"svchost.exe",     // Service Host
-		"taskhostw.exe",   // Task Host Window
-		"conhost.exe",     // Console Window Host
-		"teams-green.exe", // Our own service
-	}
-
-	// If it's a system process, don't consider it as "active use"
-	if slices.Contains(systemProcesses, exeBase) {
-		return false
-	}
-
-	// Check if the window has received recent input activity
-	// Get the last input time
+func (tm *TeamsManager) isUserInputActive() bool {
+	// Use the most reliable method: GetLastInputInfo
+	// This catches ALL input - keyboard, mouse movement, clicks, scrolling, etc.
 	var lastInputInfo struct {
 		cbSize uint32
 		dwTime uint32
@@ -277,84 +279,13 @@ func isUserActivelyUsing() bool {
 	procGetTickCount := kernel32.NewProc("GetTickCount")
 	currentTick, _, _ := procGetTickCount.Call()
 
-	// If input was received in the last 2 seconds, consider user as actively using
+	// If ANY input was received in the last 3 seconds, consider user active
 	timeSinceLastInput := uint32(currentTick) - lastInputInfo.dwTime
-	const activeThresholdMs = 2000 // 2 seconds
+	const activityThresholdMs = 3000 // 3 seconds
 
-	return timeSinceLastInput < activeThresholdMs
-}
-
-// silentSetForegroundWindow uses AttachThreadInput for quieter focus changes
-func silentSetForegroundWindow(hWnd win.HWND) error {
-	// Get current thread ID
-	currentThreadID, _, _ := procGetCurrentThreadID.Call()
-
-	// Get target window's thread ID
-	targetThreadID, _, _ := procGetWindowThreadProcessID.Call(uintptr(hWnd), 0)
-
-	// If same thread, just use regular SetForegroundWindow
-	if currentThreadID == targetThreadID {
-		ret, _, err := procSetForegroundWindow.Call(uintptr(hWnd))
-		if ret == 0 {
-			return fmt.Errorf("SetForegroundWindow failed: %v", err)
-		}
-		return nil
-	}
-
-	// Attach to target thread for silent focus change
-	ret, _, _ := procAttachThreadInput.Call(currentThreadID, targetThreadID, 1)
-	attached := ret != 0
-
-	// Attempt to set foreground window
-	ret, _, err := procSetForegroundWindow.Call(uintptr(hWnd))
-	setFocusErr := err
-	if ret == 0 {
-		setFocusErr = fmt.Errorf("SetForegroundWindow failed: %v", err)
-	}
-
-	// Always detach if we attached successfully
-	if attached {
-		_, _, _ = procAttachThreadInput.Call(currentThreadID, targetThreadID, 0)
-	}
-
-	if ret == 0 {
-		return setFocusErr
-	}
-
-	return nil
-}
-
-func (tm *TeamsManager) isUserInputActive() bool {
-	// Throttle input checks to avoid excessive API calls
-	tm.inputCheckMutex.RLock()
-	lastCheck := tm.lastInputCheck
-	tm.inputCheckMutex.RUnlock()
-
-	now := time.Now()
-	// Only check every 500ms to balance accuracy with performance
-	if now.Sub(lastCheck) < 500*time.Millisecond {
-		return false // Return false when throttled - assume no activity
-	}
-
-	// Update last check time
-	tm.inputCheckMutex.Lock()
-	tm.lastInputCheck = now
-	tm.inputCheckMutex.Unlock()
-
-	// Check for real-time input activity
-	if isKeyPressed() {
-		tm.logger.Debug("User keyboard input detected")
-		return true
-	}
-
-	if isMousePressed() {
-		tm.logger.Debug("User mouse input detected")
-		return true
-	}
-
-	// Check if user is actively using another application
-	if !tm.config.Debug && isUserActivelyUsing() {
-		tm.logger.Debug("User actively using system")
+	if timeSinceLastInput < activityThresholdMs {
+		tm.logger.Debug("User input activity detected",
+			slog.Int("ms_since_input", int(timeSinceLastInput)))
 		return true
 	}
 
@@ -365,6 +296,12 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 	// Check context first
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+
+	// Check for user input activity first - real-time keyboard detection only
+	if isKeyPressed() {
+		tm.logger.Debug("User input detected, deferring Teams key send to avoid interference")
+		return ErrUserInputActive
 	}
 
 	hwnds := tm.FindTeamsWindows()
@@ -391,14 +328,12 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 		swShowMinimized  = 2
 		swShowMaximized  = 3
 		swShowNormal     = 1
-		swShowNoActivate = 4 // Show window without activating (no taskbar flash)
 	)
 
 	successCount := 0
 	var lastError error
 
 	for _, hWnd := range hwnds {
-
 		// Batch window state queries to reduce syscalls
 		isMinimized, _, _ := procIsIconic.Call(uintptr(hWnd))
 		isMaximized, _, _ := procIsZoomed.Call(uintptr(hWnd))
@@ -420,12 +355,11 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 			continue
 		}
 
-		// Only restore if minimized, using SW_SHOWNOACTIVATE to prevent taskbar flash
+		// Only restore if minimized (performance optimization)
 		originalState := swShowNormal
 		if isMinimized != 0 {
 			originalState = swShowMinimized
-			// Use SW_SHOWNOACTIVATE to show without activating (prevents taskbar flash)
-			if ret, _, err := procShowWindow.Call(uintptr(hWnd), swShowNoActivate); ret == 0 {
+			if ret, _, err := procShowWindow.Call(uintptr(hWnd), swRestore); ret == 0 {
 				tm.logger.Debug("Failed to restore minimized window",
 					slog.String("error", err.Error()),
 					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
@@ -437,78 +371,34 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 			originalState = swShowMaximized
 		}
 
-		// Focus with retry logic
-		const (
-			maxRetries = 3
-			retryDelay = 25 * time.Millisecond
-		)
-
-		focusSuccess := false
-		var focusError error
-
-		for attempt := range maxRetries {
-			if err := silentSetForegroundWindow(hWnd); err == nil {
-				time.Sleep(focusDelay)
-
-				// Validate focus was actually set
-				focusedWindow, _, _ := procGetForegroundWindow.Call()
-				if focusedWindow == uintptr(hWnd) {
-					focusSuccess = true
-					tm.logger.Debug("Silent focus set successfully",
-						slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-						slog.Int("attempt", attempt+1))
-					break
-				}
-
-				// Focus validation failed
-				if attempt < maxRetries-1 {
-					tm.logger.Debug("Focus validation failed, retrying",
-						slog.Uint64("expected_hwnd", uint64(uintptr(hWnd))),
-						slog.Uint64("actual_focused", uint64(focusedWindow)),
-						slog.Int("attempt", attempt+1),
-						slog.Int("max_retries", maxRetries))
-					time.Sleep(retryDelay)
-					continue
-				}
-				focusError = fmt.Errorf("focus validation failed after %d attempts", maxRetries)
-			} else {
-				focusError = fmt.Errorf("silent focus failed: %v", err)
-				if attempt < maxRetries-1 {
-					tm.logger.Debug("Silent focus failed, retrying",
-						slog.String("error", err.Error()),
-						slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-						slog.Int("attempt", attempt+1))
-					time.Sleep(retryDelay)
-					continue
-				}
-			}
+		// Try to set focus using our robust focus function
+		if err := tm.setWindowFocus(hWnd); err != nil {
+			tm.logger.Debug("Failed to set focus",
+				slog.String("error", err.Error()),
+				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+			lastError = err
+			continue
 		}
 
-		if focusSuccess {
-			// Send key to focused window
-			if err := sendKeyToWindow(hWnd, vkF15); err != nil {
-				tm.logger.Debug("Failed to send F15 key",
-					slog.String("error", err.Error()),
-					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
-				lastError = err
-			} else {
-				successCount++
-				tm.logger.Debug("Sent F15 to newly focused Teams window",
-					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
-
-				// Post-send validation - verify focus didn't change unexpectedly
-				time.Sleep(5 * time.Millisecond)
-				if verifyWindow, _, _ := procGetForegroundWindow.Call(); verifyWindow != uintptr(hWnd) {
-					tm.logger.Debug("Focus changed after key send - possible interference",
-						slog.Uint64("expected", uint64(uintptr(hWnd))),
-						slog.Uint64("actual", uint64(verifyWindow)))
-				}
-			}
-		} else {
-			tm.logger.Debug("Failed to set focus after retries",
-				slog.String("error", focusError.Error()),
+		// Focus was set successfully, now send the key
+		time.Sleep(focusDelay)
+		if err := sendKeyToWindow(hWnd, vkF15); err != nil {
+			tm.logger.Debug("Failed to send F15 key",
+				slog.String("error", err.Error()),
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
-			lastError = focusError
+			lastError = err
+		} else {
+			successCount++
+			tm.logger.Debug("Sent F15 to newly focused Teams window",
+				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+
+			// Post-send validation - verify focus didn't change unexpectedly
+			time.Sleep(5 * time.Millisecond)
+			if verifyWindow, _, _ := procGetForegroundWindow.Call(); verifyWindow != uintptr(hWnd) {
+				tm.logger.Debug("Focus changed after key send - possible interference",
+					slog.Uint64("expected", uint64(uintptr(hWnd))),
+					slog.Uint64("actual", uint64(verifyWindow)))
+			}
 		}
 
 		// Restore original window state if needed
@@ -525,9 +415,10 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 	// Configurable delay before restoring focus to ensure key event is processed by Teams
 	time.Sleep(keyProcessDelay)
 
-	// Restore focus to original window using silent method
+	// Restore focus to original window
 	if currentWindow != 0 {
-		if err := silentSetForegroundWindow(win.HWND(currentWindow)); err != nil {
+		ret, _, err := procSetForegroundWindow.Call(currentWindow)
+		if ret == 0 {
 			tm.logger.Debug("Failed to restore focus to original window",
 				slog.String("error", err.Error()),
 				slog.Uint64("hwnd", uint64(currentWindow)))
