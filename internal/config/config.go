@@ -1,3 +1,4 @@
+// Package config handles application configuration, logging setup, and validation.
 package config
 
 import (

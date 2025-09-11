@@ -13,16 +13,10 @@ import (
 )
 
 func TestServiceState(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	state := &ServiceState{
 		State:            "stopped",
 		PID:              12345,
 		Clients:          make(map[*websocket.Conn]bool),
-		Logger:           logger,
-		LastActivity:     time.Now(),
 		TeamsWindowCount: 3,
 		FailureStreak:    1,
 	}
@@ -69,7 +63,7 @@ func TestServiceStateConcurrentAccess(_ *testing.T) {
 
 	// Goroutine 1: Reader
 	go func() {
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			state.Mutex.RLock()
 			_ = state.State
 			_ = state.PID
@@ -82,7 +76,7 @@ func TestServiceStateConcurrentAccess(_ *testing.T) {
 
 	// Goroutine 2: Writer
 	go func() {
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			state.Mutex.Lock()
 			state.FailureStreak = i
 			state.TeamsWindowCount = i % 5
@@ -138,12 +132,7 @@ func TestEvent(t *testing.T) {
 }
 
 func TestEventTimestamp(t *testing.T) {
-	event := &Event{
-		Service: "teams-green",
-		Status:  "running",
-		PID:     12345,
-		Message: "Test timestamp",
-	}
+	event := &Event{}
 
 	// Initially timestamp should be zero
 	if !event.Timestamp.IsZero() {
@@ -364,20 +353,9 @@ func TestMultipleServerStartStop(t *testing.T) {
 func TestWebSocketHandler(t *testing.T) {
 	// This tests the HandleConnection function indirectly by testing
 	// the connection handling logic
-
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	state := &ServiceState{
-		State:            "running",
-		PID:              12345,
-		Clients:          make(map[*websocket.Conn]bool),
-		Mutex:            sync.RWMutex{},
-		Logger:           logger,
-		LastActivity:     time.Now(),
-		TeamsWindowCount: 2,
-		FailureStreak:    0,
+		Clients: make(map[*websocket.Conn]bool),
+		Mutex:   sync.RWMutex{},
 	}
 
 	// Test that we can create a service state for handler use

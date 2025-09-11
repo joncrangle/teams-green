@@ -1,3 +1,4 @@
+// Package websocket implements a WebSocket server for real-time communication.
 package websocket
 
 import (

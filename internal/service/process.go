@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -242,11 +243,8 @@ func getTeamsWindowCountForStatus() int {
 		}
 
 		// Check if this is a Teams executable
-		for _, teamsExe := range teamsExecutables {
-			if exeBase == teamsExe {
-				windowCount++
-				break
-			}
+		if slices.Contains(teamsExecutables, exeBase) {
+			windowCount++
 		}
 
 		return 1

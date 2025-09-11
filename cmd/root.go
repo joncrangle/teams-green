@@ -1,3 +1,4 @@
+// Package cmd implements the command-line interface for the teams-green application.
 package cmd
 
 import (

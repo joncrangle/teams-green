@@ -1,3 +1,4 @@
+// Package service implements the main functionality of the teams-green application.
 package service
 
 import (
@@ -67,13 +68,11 @@ type Service struct {
 }
 
 type TeamsManager struct {
-	windowCache     *WindowCache
-	retryState      *RetryState
-	logger          *slog.Logger
-	enumContext     *WindowEnumContext
-	config          *config.Config
-	lastInputCheck  time.Time
-	inputCheckMutex sync.RWMutex
+	windowCache *WindowCache
+	retryState  *RetryState
+	logger      *slog.Logger
+	enumContext *WindowEnumContext
+	config      *config.Config
 }
 
 func NewService(cfg *config.Config) *Service {

@@ -26,7 +26,6 @@ const (
 	readTimeout       = 120 * time.Second // 2 minutes - increased for stability
 	writeTimeout      = 30 * time.Second  // 30 seconds for writes
 	pingInterval      = 30 * time.Second  // Send ping every 30 seconds
-	pongTimeout       = 10 * time.Second  // Wait 10 seconds for pong response
 	keepAliveInterval = 45 * time.Second  // Send keep-alive message every 45 seconds
 )
 
@@ -213,8 +212,8 @@ func isTimeoutError(err error) bool {
 }
 
 // GetConnectionStats returns current connection statistics
-func GetConnectionStats() map[string]interface{} {
-	return map[string]interface{}{
+func GetConnectionStats() map[string]any {
+	return map[string]any{
 		"active_connections":         atomic.LoadInt32(&activeConnections),
 		"max_connections":            maxConnections,
 		"max_message_size":           maxMessageSize,
