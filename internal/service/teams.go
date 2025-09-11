@@ -164,7 +164,7 @@ func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
 func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 	const (
 		maxRetries = 3
-		retryDelay = 50 * time.Millisecond
+		retryDelay = 100 * time.Millisecond
 	)
 
 	// First, check if window already has focus
@@ -192,21 +192,28 @@ func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 			tm.logger.Debug("BringWindowToTop failed",
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 		}
-		time.Sleep(15 * time.Millisecond)
+		// Increased delay for Teams Electron app to process window operations
+		time.Sleep(50 * time.Millisecond)
 
 		// Try normal SetForegroundWindow first
 		setFgRet, _, setFgErr := procSetForegroundWindow.Call(uintptr(hWnd))
 
-		// Give Windows time to process the focus change
-		time.Sleep(30 * time.Millisecond)
+		// Give Windows more time to process the focus change for Electron apps
+		time.Sleep(75 * time.Millisecond)
 
-		// Always check if focus was actually set, regardless of return value
-		focusedWindow, _, _ := procGetForegroundWindow.Call()
-		if focusedWindow == uintptr(hWnd) {
-			tm.logger.Debug("Focus set successfully with SetForegroundWindow",
-				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-				slog.Int("attempt", attempt+1))
-			return nil
+		// Check multiple times with short intervals to catch delayed focus changes
+		for i := range 3 {
+			focusedWindow, _, _ := procGetForegroundWindow.Call()
+			if focusedWindow == uintptr(hWnd) {
+				tm.logger.Debug("Focus set successfully with SetForegroundWindow",
+					slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+					slog.Int("attempt", attempt+1),
+					slog.Int("verify_attempt", i+1))
+				return nil
+			}
+			if i < 2 { // Don't sleep on the last check
+				time.Sleep(25 * time.Millisecond)
+			}
 		}
 
 		// If direct approach failed, try AttachThreadInput as fallback
@@ -226,14 +233,20 @@ func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 				}
 
 				if attachSetRet != 0 {
-					// Verify focus was set
-					time.Sleep(30 * time.Millisecond)
-					focusedWindow, _, _ := procGetForegroundWindow.Call()
-					if focusedWindow == uintptr(hWnd) {
-						tm.logger.Debug("Focus set successfully with AttachThreadInput",
-							slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-							slog.Int("attempt", attempt+1))
-						return nil
+					// Verify focus was set with longer delay and multiple checks
+					time.Sleep(75 * time.Millisecond)
+					for i := range 3 {
+						focusedWindow, _, _ := procGetForegroundWindow.Call()
+						if focusedWindow == uintptr(hWnd) {
+							tm.logger.Debug("Focus set successfully with AttachThreadInput",
+								slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+								slog.Int("attempt", attempt+1),
+								slog.Int("verify_attempt", i+1))
+							return nil
+						}
+						if i < 2 { // Don't sleep on the last check
+							time.Sleep(25 * time.Millisecond)
+						}
 					}
 				}
 			} else {
@@ -245,13 +258,14 @@ func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 
 		// Log failure details for debugging, but only if not last attempt
 		if attempt < maxRetries-1 {
+			currentFocusWindow, _, _ := procGetForegroundWindow.Call()
 			tm.logger.Debug("Focus attempt failed, retrying",
 				slog.String("setfg_error", setFgErr.Error()),
 				slog.Bool("setfg_success", setFgRet != 0),
 				slog.Bool("allow_success", allowRet != 0),
 				slog.Bool("bring_success", bringRet != 0),
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-				slog.Uint64("current_focus", uint64(focusedWindow)),
+				slog.Uint64("current_focus", uint64(currentFocusWindow)),
 				slog.Int("attempt", attempt+1))
 			time.Sleep(retryDelay)
 		}
@@ -417,6 +431,7 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 
 	// Store the currently focused window to restore it later
 	currentWindow, _, _ := procGetForegroundWindow.Call()
+	var pipWindowMinimized bool
 
 	const (
 		vkF15            = 0x7E // F15 key
@@ -427,6 +442,23 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 		swShowMaximized  = 3
 		swShowNormal     = 1
 	)
+
+	// Check if current window is a PIP window that might block focus changes
+	if currentWindow != 0 && tm.isPIPWindow(win.HWND(currentWindow)) {
+		tm.logger.Debug("Current focus is on PIP window, temporarily minimizing to allow focus changes",
+			slog.Uint64("pip_hwnd", uint64(currentWindow)))
+
+		// Minimize the PIP window temporarily to allow focus changes
+		ret, _, _ := procShowWindow.Call(currentWindow, swShowMinimized)
+		if ret != 0 {
+			pipWindowMinimized = true
+			// Give Windows time to process the minimize
+			time.Sleep(50 * time.Millisecond)
+		} else {
+			tm.logger.Debug("Failed to minimize PIP window",
+				slog.Uint64("pip_hwnd", uint64(currentWindow)))
+		}
+	}
 
 	successCount := 0
 	var lastError error
@@ -506,8 +538,8 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 			tm.logger.Debug("Sent F15 to newly focused Teams window",
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 
-			// Post-send validation - verify focus didn't change unexpectedly
-			time.Sleep(5 * time.Millisecond)
+			// Post-send validation - verify focus with longer timeout for Electron apps
+			time.Sleep(25 * time.Millisecond)
 			if verifyWindow, _, _ := procGetForegroundWindow.Call(); verifyWindow != uintptr(hWnd) {
 				tm.logger.Debug("Focus changed after key send - possible interference",
 					slog.Uint64("expected", uint64(uintptr(hWnd))),
@@ -540,6 +572,19 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 		} else {
 			tm.logger.Debug("Successfully restored focus to original window",
 				slog.Uint64("hwnd", uint64(currentWindow)))
+		}
+	}
+
+	// If we minimized a PIP window, restore it after focus operations
+	if pipWindowMinimized {
+		time.Sleep(100 * time.Millisecond) // Ensure Teams operations complete
+		ret, _, _ := procShowWindow.Call(currentWindow, swRestore)
+		if ret != 0 {
+			tm.logger.Debug("Successfully restored PIP window",
+				slog.Uint64("pip_hwnd", uint64(currentWindow)))
+		} else {
+			tm.logger.Debug("Failed to restore PIP window",
+				slog.Uint64("pip_hwnd", uint64(currentWindow)))
 		}
 	}
 
