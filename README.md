@@ -131,11 +131,26 @@ The service accepts the following flags:
 | `--focus-delay`       |       | `150`    | Delay after setting focus before sending key (ms) |
 | `--restore-delay`     |       | `100`    | Delay after restoring minimized window (ms)       |
 | `--key-process-delay` |       | `150`   | Delay before restoring original focus (ms)        |
+| `--activity-mode`     |       | `focus` | Activity mode: 'focus' (bring Teams forward) or 'global' (no focus change) |
 | `--log-format`        |       | `text`  | Log format: text or json                          |
 | `--log-file`          |       | ``      | Log file path (empty = no file logging)           |
 | `--log-rotate`        |       | `falsmse` | Enable log rotation                               |
 | `--max-log-size`      |       | `10`    | Maximum log file size in MB                       |
 | `--max-log-age`       |       | `30`    | Maximum log file age in days                      |
+
+### Activity Modes
+
+Teams-Green supports two activity modes:
+
+- focus (default): Attempts to locate and focus a Teams window before sending the F15 key. This provides targeted delivery but may cause a brief taskbar highlight or focus flash.
+- global: Sends the F15 key as a global input event without changing window focus. Use this if window flashing is distracting or focus cannot reliably be changed (e.g., strict system policies).
+
+Fallback: In focus mode, if focus cannot be set after retries, the service will still attempt to send the key so Teams may register activity. Switch to global mode if you prefer to skip all focus operations.
+
+Example:
+```bash
+teams-green start --activity-mode global --interval 120
+```
 
 ### Timing Configuration
 

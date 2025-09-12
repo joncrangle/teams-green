@@ -11,13 +11,15 @@ import (
 	"golang.org/x/net/websocket"
 )
 
+// Event represents a WebSocket message exchanged between the service and clients.
+// It contains service status information and control messages like ping/pong.
 type Event struct {
-	Service   string    `json:"service"`
-	Status    string    `json:"status"`
-	PID       int       `json:"pid"`
-	Timestamp time.Time `json:"timestamp"`
-	Message   string    `json:"message,omitempty"`
-	Type      string    `json:"type,omitempty"` // ping, pong, etc.
+	Service   string    `json:"service"`           // Service name (e.g., "teams-green")
+	Status    string    `json:"status"`            // Current service status
+	PID       int       `json:"pid"`               // Process ID of the service
+	Timestamp time.Time `json:"timestamp"`         // When the event was created
+	Message   string    `json:"message,omitempty"` // Optional human-readable message
+	Type      string    `json:"type,omitempty"`    // Message type: "ping", "pong", "status", "keepalive"
 }
 
 const (
@@ -31,22 +33,49 @@ const (
 
 var activeConnections int32 // Atomic counter for active connections
 
+// HandleConnection manages a WebSocket client connection with proper lifecycle management,
+// connection limits, keep-alive handling, and message processing.
 func HandleConnection(ws *websocket.Conn, state *ServiceState) {
-	// Check connection limits
+	// Check and enforce connection limits
+	if !checkConnectionLimit(ws, state) {
+		return
+	}
+
+	// Register client and send initial state
+	setupClientConnection(ws, state)
+
+	// Set up cleanup handler
+	defer cleanupClientConnection(ws, state)
+
+	// Start background handlers
+	done := make(chan struct{})
+	defer close(done)
+	go keepAliveHandler(ws, state, done)
+
+	// Handle incoming messages
+	handleClientMessages(ws, state)
+}
+
+// checkConnectionLimit enforces the maximum number of concurrent connections.
+func checkConnectionLimit(ws *websocket.Conn, state *ServiceState) bool {
 	if atomic.LoadInt32(&activeConnections) >= maxConnections {
 		state.Logger.Warn("Connection rejected - too many active connections",
 			slog.Int("active", int(atomic.LoadInt32(&activeConnections))),
 			slog.Int("max", maxConnections))
 		ws.Close()
-		return
+		return false
 	}
 
 	atomic.AddInt32(&activeConnections, 1)
-	defer atomic.AddInt32(&activeConnections, -1)
+	return true
+}
 
-	// Set max message size
+// setupClientConnection registers the client and sends the current service state.
+func setupClientConnection(ws *websocket.Conn, state *ServiceState) {
+	// Set message size limit
 	ws.MaxPayloadBytes = maxMessageSize
 
+	// Register client
 	state.Mutex.Lock()
 	state.Clients[ws] = true
 	clientCount := len(state.Clients)
@@ -57,7 +86,12 @@ func HandleConnection(ws *websocket.Conn, state *ServiceState) {
 		slog.Int("total_clients", clientCount),
 		slog.Int("active_connections", int(atomic.LoadInt32(&activeConnections))))
 
-	// Send current state immediately
+	// Send current service state to new client
+	sendInitialState(ws, state)
+}
+
+// sendInitialState sends the current service status to a newly connected client.
+func sendInitialState(ws *websocket.Conn, state *ServiceState) {
 	currentEvent := Event{
 		Service: "teams-green",
 		Status:  state.State,
@@ -68,29 +102,26 @@ func HandleConnection(ws *websocket.Conn, state *ServiceState) {
 	if msg, err := json.Marshal(currentEvent); err == nil {
 		_ = sendMessageWithTimeout(ws, string(msg), writeTimeout)
 	}
+}
 
-	// Cleanup on disconnect
-	defer func() {
-		state.Mutex.Lock()
-		delete(state.Clients, ws)
-		remainingClients := len(state.Clients)
-		state.Mutex.Unlock()
+// cleanupClientConnection removes the client from the registry and closes the connection.
+func cleanupClientConnection(ws *websocket.Conn, state *ServiceState) {
+	atomic.AddInt32(&activeConnections, -1)
 
-		ws.Close()
-		state.Logger.Info("WebSocket client disconnected",
-			slog.String("remote_addr", ws.Request().RemoteAddr),
-			slog.Int("remaining_clients", remainingClients),
-			slog.Int("active_connections", int(atomic.LoadInt32(&activeConnections))))
-	}()
+	state.Mutex.Lock()
+	delete(state.Clients, ws)
+	remainingClients := len(state.Clients)
+	state.Mutex.Unlock()
 
-	// Create channels for coordinating goroutines
-	done := make(chan struct{})
-	defer close(done)
+	ws.Close()
+	state.Logger.Info("WebSocket client disconnected",
+		slog.String("remote_addr", ws.Request().RemoteAddr),
+		slog.Int("remaining_clients", remainingClients),
+		slog.Int("active_connections", int(atomic.LoadInt32(&activeConnections))))
+}
 
-	// Start keep-alive goroutine
-	go keepAliveHandler(ws, state, done)
-
-	// Message reading loop with improved error handling
+// handleClientMessages processes incoming WebSocket messages in a loop.
+func handleClientMessages(ws *websocket.Conn, state *ServiceState) {
 	for {
 		if err := ws.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
 			state.Logger.Debug("Failed to set read deadline", slog.String("error", err.Error()))
@@ -100,17 +131,7 @@ func HandleConnection(ws *websocket.Conn, state *ServiceState) {
 		var msg string
 		err := websocket.Message.Receive(ws, &msg)
 		if err != nil {
-			if err != io.EOF {
-				// Only log timeout errors at debug level to reduce noise
-				if isTimeoutError(err) {
-					state.Logger.Debug("WebSocket read timeout (client may be idle)",
-						slog.String("remote_addr", ws.Request().RemoteAddr))
-				} else {
-					state.Logger.Debug("WebSocket read error",
-						slog.String("error", err.Error()),
-						slog.String("remote_addr", ws.Request().RemoteAddr))
-				}
-			}
+			handleReceiveError(err, ws, state)
 			return
 		}
 
@@ -122,7 +143,7 @@ func HandleConnection(ws *websocket.Conn, state *ServiceState) {
 			continue
 		}
 
-		// Handle ping/pong messages
+		// Process the message
 		if err := handleMessage(ws, msg, state); err != nil {
 			state.Logger.Debug("Error handling message",
 				slog.String("error", err.Error()),
@@ -132,6 +153,23 @@ func HandleConnection(ws *websocket.Conn, state *ServiceState) {
 	}
 }
 
+// handleReceiveError processes WebSocket receive errors appropriately.
+func handleReceiveError(err error, ws *websocket.Conn, state *ServiceState) {
+	if err == io.EOF {
+		return // Clean disconnect
+	}
+
+	if isTimeoutError(err) {
+		state.Logger.Debug("WebSocket read timeout (client may be idle)",
+			slog.String("remote_addr", ws.Request().RemoteAddr))
+	} else {
+		state.Logger.Debug("WebSocket read error",
+			slog.String("error", err.Error()),
+			slog.String("remote_addr", ws.Request().RemoteAddr))
+	}
+}
+
+// sendMessageWithTimeout sends a WebSocket message with a write deadline to prevent hanging.
 func sendMessageWithTimeout(ws *websocket.Conn, msg string, timeout time.Duration) error {
 	if err := ws.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
 		return err
@@ -139,7 +177,8 @@ func sendMessageWithTimeout(ws *websocket.Conn, msg string, timeout time.Duratio
 	return websocket.Message.Send(ws, msg)
 }
 
-// keepAliveHandler sends periodic keep-alive messages to maintain connection
+// keepAliveHandler sends periodic keep-alive messages to maintain connection health.
+// It runs in a separate goroutine and stops when the done channel is closed.
 func keepAliveHandler(ws *websocket.Conn, state *ServiceState, done <-chan struct{}) {
 	keepAliveTicker := time.NewTicker(keepAliveInterval)
 	defer keepAliveTicker.Stop()
@@ -170,7 +209,7 @@ func keepAliveHandler(ws *websocket.Conn, state *ServiceState, done <-chan struc
 	}
 }
 
-// handleMessage processes incoming WebSocket messages
+// handleMessage processes incoming WebSocket messages, handling ping/pong and other control messages.
 func handleMessage(ws *websocket.Conn, msg string, state *ServiceState) error {
 	// Try to parse as JSON event
 	var event Event
@@ -203,7 +242,7 @@ func handleMessage(ws *websocket.Conn, msg string, state *ServiceState) error {
 	return nil
 }
 
-// isTimeoutError checks if the error is a timeout error
+// isTimeoutError checks if the error is a timeout-related error by examining the error message.
 func isTimeoutError(err error) bool {
 	if err == nil {
 		return false
@@ -211,7 +250,7 @@ func isTimeoutError(err error) bool {
 	return strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "i/o timeout")
 }
 
-// GetConnectionStats returns current connection statistics
+// GetConnectionStats returns current WebSocket connection statistics and configuration.
 func GetConnectionStats() map[string]any {
 	return map[string]any{
 		"active_connections":         atomic.LoadInt32(&activeConnections),

@@ -26,6 +26,9 @@ type Config struct {
 	MaxLogSize int // MB
 	MaxLogAge  int // days
 
+	// ActivityMode controls how keys are sent: "focus" (default) or "global"
+	ActivityMode string
+
 	// Teams key sending timing configuration (milliseconds)
 	FocusDelayMs      int // Delay after setting focus before sending key
 	RestoreDelayMs    int // Delay after restoring minimized window
@@ -54,6 +57,40 @@ func (cfg *Config) GetKeyProcessDelay() time.Duration {
 		return time.Duration(cfg.KeyProcessDelayMs) * time.Millisecond
 	}
 	return 75 * time.Millisecond // Default value
+}
+
+// GetThrottleDelay returns a reasonable throttle delay
+func (cfg *Config) GetThrottleDelay() time.Duration {
+	return 50 * time.Millisecond // Default throttle delay
+}
+
+// GetActivityGraceDelay returns grace period after user activity
+func (cfg *Config) GetActivityGraceDelay() time.Duration {
+	return 2 * time.Second // Default grace delay
+}
+
+// GetUserInputCooldown returns cooldown period for user input detection
+func (cfg *Config) GetUserInputCooldown() time.Duration {
+	return 500 * time.Millisecond // Default cooldown
+}
+
+// GetUserInputThreshold returns threshold for input detection sensitivity
+func (cfg *Config) GetUserInputThreshold() int {
+	return 3 // Default threshold
+}
+
+// IsDebugEnabled returns whether debug mode is enabled
+func (cfg *Config) IsDebugEnabled() bool {
+	return cfg.Debug
+}
+
+// GetActivityMode returns sanitized activity mode (focus|global)
+func (cfg *Config) GetActivityMode() string {
+	mode := strings.ToLower(strings.TrimSpace(cfg.ActivityMode))
+	if mode != "global" {
+		return "focus"
+	}
+	return mode
 }
 
 var PidFile string
@@ -311,6 +348,14 @@ func (cfg *Config) Validate() error {
 		errors = append(errors, "key process delay must be between 0 and 5000 milliseconds")
 	}
 
+	// Validate activity mode
+	if cfg.ActivityMode != "" {
+		am := strings.ToLower(cfg.ActivityMode)
+		if am != "focus" && am != "global" {
+			errors = append(errors, "activity mode must be 'focus' or 'global'")
+		}
+	}
+
 	// Validate port with additional security checks
 	if cfg.WebSocket {
 		if cfg.Port < 1024 {
@@ -326,6 +371,12 @@ func (cfg *Config) Validate() error {
 				fmt.Printf("⚠️  Warning: Port %d is commonly used and may conflict with other services\n", port)
 				break
 			}
+		}
+
+		// Verify the port is available (best-effort). This attempts a bind and then
+		// immediately releases it. If unavailable, treat as validation error.
+		if err := checkPortAvailable(cfg.Port); err != nil {
+			errors = append(errors, fmt.Sprintf("port %d is unavailable: %v", cfg.Port, err))
 		}
 	}
 

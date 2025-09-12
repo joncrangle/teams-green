@@ -327,13 +327,13 @@ func TestMultipleServerStartStop(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Try to start another server (should fail because server is already running)
-	err = StartServer(port+1, state)
+	// Try to start another server on the same port (should fail due to port binding)
+	err = StartServer(port, state)
 	if err == nil {
-		t.Error("should not be able to start multiple servers")
+		t.Error("should not be able to start server on already bound port")
 		StopServer()
 	} else {
-		t.Logf("correctly prevented multiple servers: %v", err)
+		t.Logf("correctly prevented server start on bound port: %v", err)
 	}
 
 	// Stop the first server

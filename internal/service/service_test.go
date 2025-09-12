@@ -3,15 +3,14 @@ package service
 import (
 	"context"
 	"log/slog"
+	"net"
 	"os"
 	"slices"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/joncrangle/teams-green/internal/config"
 	"github.com/joncrangle/teams-green/internal/websocket"
-	"github.com/lxn/win"
 )
 
 func TestNewService(t *testing.T) {
@@ -76,18 +75,26 @@ func TestServiceSetState(t *testing.T) {
 }
 
 func TestServiceSetStateWithWebSocket(t *testing.T) {
+	// Find an available port
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("failed to find available port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+
 	cfg := &config.Config{
 		Debug:     false,
 		Interval:  180,
 		WebSocket: true,
-		Port:      8766,
+		Port:      port,
 		LogFormat: "text",
 	}
 
 	svc := NewService(cfg)
 
 	// Start websocket server for testing
-	err := websocket.StartServer(cfg.Port, svc.state)
+	err = websocket.StartServer(cfg.Port, svc.state)
 	if err != nil {
 		t.Fatalf("failed to start websocket server: %v", err)
 	}
@@ -131,130 +138,33 @@ func TestServiceMainLoop(t *testing.T) {
 }
 
 func TestTeamsManager(t *testing.T) {
+	cfg := &config.Config{
+		Debug:     false,
+		Interval:  180,
+		WebSocket: false,
+		LogFormat: "text",
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 
 	tm := &TeamsManager{
-		windowCache: &WindowCache{
-			Windows:       make([]TeamsWindow, 0),
-			CacheDuration: 30 * time.Second,
-		},
-		retryState: &RetryState{
-			MaxBackoff: 300,
-		},
 		logger: logger,
-	}
-
-	if tm.windowCache == nil {
-		t.Error("window cache should not be nil")
-	}
-
-	if tm.retryState == nil {
-		t.Error("retry state should not be nil")
+		config: cfg,
 	}
 
 	if tm.logger == nil {
 		t.Error("logger should not be nil")
 	}
-}
 
-func TestWindowCache(t *testing.T) {
-	cache := &WindowCache{
-		Windows:       make([]TeamsWindow, 0),
-		CacheDuration: 30 * time.Second,
-		Mutex:         sync.RWMutex{},
-	}
-
-	// Test initial state
-	if len(cache.Windows) != 0 {
-		t.Error("initial window cache should be empty")
-	}
-
-	// Add a test window
-	testWindow := TeamsWindow{
-		HWND:           win.HWND(12345),
-		ProcessID:      1000,
-		ExecutablePath: "c:\\test\\teams.exe",
-		WindowTitle:    "Microsoft Teams",
-		LastSeen:       time.Now(),
-		IsValid:        true,
-	}
-
-	cache.Mutex.Lock()
-	cache.Windows = append(cache.Windows, testWindow)
-	cache.LastUpdate = time.Now()
-	cache.Mutex.Unlock()
-
-	cache.Mutex.RLock()
-	if len(cache.Windows) != 1 {
-		t.Errorf("expected 1 window in cache, got %d", len(cache.Windows))
-	}
-
-	window := cache.Windows[0]
-	if window.ProcessID != 1000 {
-		t.Errorf("expected process ID 1000, got %d", window.ProcessID)
-	}
-	cache.Mutex.RUnlock()
-}
-
-func TestRetryState(t *testing.T) {
-	retry := &RetryState{
-		MaxBackoff: 300,
-	}
-
-	// Test initial state
-	if retry.FailureCount != 0 {
-		t.Error("initial failure count should be 0")
-	}
-
-	if retry.BackoffSeconds != 0 {
-		t.Error("initial backoff should be 0")
-	}
-
-	// Simulate failure
-	retry.FailureCount++
-	retry.ConsecutiveFailures++
-	retry.LastFailure = time.Now()
-
-	if retry.FailureCount != 1 {
-		t.Errorf("expected failure count 1, got %d", retry.FailureCount)
-	}
-
-	if retry.ConsecutiveFailures != 1 {
-		t.Errorf("expected consecutive failures 1, got %d", retry.ConsecutiveFailures)
-	}
-}
-
-func TestTeamsWindow(t *testing.T) {
-	window := TeamsWindow{
-		HWND:           win.HWND(12345),
-		ProcessID:      1000,
-		ExecutablePath: "c:\\test\\teams.exe",
-		WindowTitle:    "Microsoft Teams",
-		LastSeen:       time.Now(),
-		IsValid:        true,
-	}
-
-	if window.HWND != win.HWND(12345) {
-		t.Errorf("expected HWND 12345, got %d", window.HWND)
-	}
-
-	if window.ProcessID != 1000 {
-		t.Errorf("expected process ID 1000, got %d", window.ProcessID)
-	}
-
-	if !window.IsValid {
-		t.Error("window should be valid")
-	}
-
-	if window.ExecutablePath != "c:\\test\\teams.exe" {
-		t.Errorf("expected executable path 'c:\\test\\teams.exe', got '%s'", window.ExecutablePath)
+	if tm.config == nil {
+		t.Error("config should not be nil")
 	}
 }
 
 func TestDiscoverTeamsExecutables(t *testing.T) {
-	executables := getTeamsExecutables()
+	executables := teamsExecutables
 
 	if len(executables) == 0 {
 		t.Error("should discover at least some teams executables")

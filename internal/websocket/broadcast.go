@@ -10,38 +10,50 @@ import (
 	"golang.org/x/net/websocket"
 )
 
+const (
+	// bufferSize is the initial capacity for JSON encoding buffers
+	bufferSize = 512
+)
+
 var bufferPool = sync.Pool{
 	New: func() any {
-		return bytes.NewBuffer(make([]byte, 0, 512))
+		return bytes.NewBuffer(make([]byte, 0, bufferSize))
 	},
 }
 
+// Broadcast sends an event to all connected WebSocket clients.
+// It handles JSON marshaling, client cleanup, and error recovery.
+// The function is thread-safe and uses a buffer pool for efficient memory usage.
 func Broadcast(e *Event, state *ServiceState) {
 	state.Mutex.Lock()
 	defer state.Mutex.Unlock()
 
+	// Set timestamp for the event
 	e.Timestamp = time.Now()
 
-	// Get buffer from pool
+	// Get a buffer from the pool for efficient JSON encoding
 	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer bufferPool.Put(buf)
 
-	// Create new encoder for this buffer (don't pool encoders)
+	// Create JSON encoder for this buffer (encoders are not pooled for thread safety)
 	encoder := json.NewEncoder(buf)
 
+	// Marshal the event to JSON
 	if err := encoder.Encode(e); err != nil {
-		state.Logger.Error("Error marshaling event", slog.String("error", err.Error()))
+		state.Logger.Error("Failed to marshal event to JSON",
+			slog.String("error", err.Error()),
+			slog.String("event_type", e.Service))
 		return
 	}
 
 	msg := buf.String()
 
-	// Clean up disconnected clients and broadcast to active ones
+	// Broadcast to all clients and clean up disconnected ones
 	disconnectedCount := 0
 	for conn := range state.Clients {
 		if err := websocket.Message.Send(conn, msg); err != nil {
-			state.Logger.Debug("WebSocket client disconnected during broadcast",
+			state.Logger.Debug("WebSocket client disconnected during broadcast, cleaning up",
 				slog.String("error", err.Error()))
 			conn.Close()
 			delete(state.Clients, conn)
@@ -49,9 +61,10 @@ func Broadcast(e *Event, state *ServiceState) {
 		}
 	}
 
+	// Log cleanup summary if any clients were disconnected
 	if disconnectedCount > 0 {
-		state.Logger.Debug("Cleaned up disconnected clients",
+		state.Logger.Debug("Cleaned up disconnected WebSocket clients",
 			slog.Int("disconnected_count", disconnectedCount),
-			slog.Int("active_clients", len(state.Clients)))
+			slog.Int("remaining_clients", len(state.Clients)))
 	}
 }

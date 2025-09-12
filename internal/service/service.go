@@ -19,44 +19,18 @@ import (
 	ws "golang.org/x/net/websocket"
 )
 
-type TeamsWindow struct {
-	HWND           win.HWND
-	ProcessID      uint32
-	ExecutablePath string
-	WindowTitle    string
-	LastSeen       time.Time
-	IsValid        bool
-}
+const (
+	healthCheckInterval = 5 * time.Minute
+	memoryThreshold     = 100 * 1024 * 1024 // 100MB
+	goroutineThreshold  = 50
+	maxMissingLogs      = 3
+	failureBackoffStart = 10
+	maxBackoffSeconds   = 60
+	panicRestartDelay   = 10 * time.Second
+	shutdownSleep       = 500 * time.Millisecond
+)
 
-type WindowCache struct {
-	Windows              []TeamsWindow
-	LastUpdate           time.Time
-	Mutex                sync.RWMutex
-	CacheDuration        time.Duration
-	LastFullScan         time.Time
-	QuickScanMode        bool
-	FailureCount         int
-	LastFailure          time.Time
-	AdaptiveScanInterval time.Duration
-	SystemBootTime       time.Time         // Track system boot time to detect hibernation/sleep
-	LastCacheCheck       time.Time         // Track when cache was last validated
-	BloomFilter          []uint64          // Simple bloom filter for PID tracking
-	BloomSize            int               // Size of bloom filter
-	ProcessHashes        map[uint32]uint64 // Process ID -> hash mapping
-}
-
-type RetryState struct {
-	FailureCount        int
-	LastFailure         time.Time
-	BackoffSeconds      int
-	MaxBackoff          int
-	TeamsRestartCount   int
-	LastTeamsRestart    time.Time
-	ConsecutiveFailures int
-	CircuitBreakerOpen  bool
-	CircuitOpenTime     time.Time
-}
-
+// Service manages the teams-green application lifecycle and activity monitoring.
 type Service struct {
 	logger             *slog.Logger
 	config             *config.Config
@@ -67,12 +41,38 @@ type Service struct {
 	activityCheckMutex sync.RWMutex
 }
 
-type TeamsManager struct {
-	windowCache *WindowCache
-	retryState  *RetryState
-	logger      *slog.Logger
-	enumContext *WindowEnumContext
-	config      *config.Config
+// updateActivityState atomically updates service scheduling timestamps and shared state following
+// a successful Teams activity cycle. This reduces lock interleaving between state.Mutex and
+// activityCheckMutex and ensures timing and observable state advance together.
+func (s *Service) updateActivityState(activityTime time.Time) {
+	// Lock order: activityCheckMutex then state.Mutex to avoid potential deadlocks.
+	s.activityCheckMutex.Lock()
+	s.state.Mutex.Lock()
+
+	s.state.LastActivity = activityTime
+	// SendKeysToTeams success implies at least one Teams window; set to 1 (actual enumeration would be redundant)
+	s.state.TeamsWindowCount = 1
+	s.state.FailureStreak = 0
+	s.nextTeamsActivity = activityTime.Add(time.Duration(s.config.Interval) * time.Second)
+
+	s.state.Mutex.Unlock()
+	s.activityCheckMutex.Unlock()
+}
+
+func newTeamsManager(logger *slog.Logger, cfg *config.Config) *TeamsManager {
+	return &TeamsManager{
+		now:                time.Now,
+		logger:             logger,
+		config:             cfg,
+		focusFailures:      make(map[win.HWND]focusFailInfo),
+		lastEscalation:     make(map[win.HWND]time.Time),
+		escalationCooldown: escalationCooldownDefault,
+		enumContext: &WindowEnumContext{
+			teamsExecutables: teamsExecutables,
+			logger:           logger,
+			mutex:            &sync.Mutex{},
+		},
+	}
 }
 
 func NewService(cfg *config.Config) *Service {
@@ -88,27 +88,7 @@ func NewService(cfg *config.Config) *Service {
 		Logger:           logger,
 	}
 
-	teamsMgr := &TeamsManager{
-		windowCache: &WindowCache{
-			Windows:              make([]TeamsWindow, 0),
-			CacheDuration:        30 * time.Second,
-			AdaptiveScanInterval: 5 * time.Minute,
-			SystemBootTime:       time.Now(), // Initialize with current time
-			LastCacheCheck:       time.Now(),
-			BloomSize:            256,                // 2KB bloom filter
-			BloomFilter:          make([]uint64, 32), // 256 bits / 8 bits per uint64 = 32
-			ProcessHashes:        make(map[uint32]uint64),
-		},
-		enumContext: &WindowEnumContext{
-			teamsExecutables: getTeamsExecutables(),
-			logger:           logger,
-		},
-		retryState: &RetryState{
-			MaxBackoff: 300, // 5 minutes max
-		},
-		logger: logger,
-		config: cfg,
-	}
+	teamsMgr := newTeamsManager(logger, cfg)
 
 	now := time.Now()
 	return &Service{
@@ -145,12 +125,14 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 	ticker := time.NewTicker(loopTime)
 	defer ticker.Stop()
 
+	// Separate ticker for user activity (check every 500ms for responsive detection)
+	activityTicker := time.NewTicker(500 * time.Millisecond)
+	defer activityTicker.Stop()
+
 	teamsMissingCount := 0
-	const maxMissingLogs = 3
 
 	// Health check tracking
 	var lastHealthCheck time.Time
-	const healthCheckInterval = 5 * time.Minute
 
 	// Panic recovery for main loop
 	defer func() {
@@ -161,7 +143,7 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 				return
 			}
 			// Attempt to restart the loop after a delay only in production
-			time.Sleep(10 * time.Second)
+			time.Sleep(panicRestartDelay)
 			if ctx.Err() == nil {
 				s.logger.Info("Attempting to restart main loop after panic")
 				go s.MainLoop(ctx, loopTime)
@@ -177,6 +159,13 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 		case <-ctx.Done():
 			s.logger.Info("Main loop stopping")
 			return
+		case <-activityTicker.C:
+			// Check context again before processing
+			if ctx.Err() != nil {
+				return
+			}
+			// Quick user activity check only
+			s.handleUserActivity()
 		case <-ticker.C:
 			// Check context again before processing
 			if ctx.Err() != nil {
@@ -184,90 +173,26 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 				return
 			}
 
-			s.logger.Debug("Main loop tick")
+			// Log time until next Teams activity in MM:SS format
+			s.activityCheckMutex.RLock()
+			timeUntilNext := time.Until(s.nextTeamsActivity)
+			s.activityCheckMutex.RUnlock()
+
+			if timeUntilNext > 0 {
+				minutes := int(timeUntilNext.Minutes())
+				seconds := int(timeUntilNext.Seconds()) % 60
+				s.logger.Debug(fmt.Sprintf("Next Teams activity in %02d:%02d", minutes, seconds))
+			} else {
+				s.logger.Debug("Teams activity ready")
+			}
 
 			// Periodic health check
 			now := time.Now()
-			if now.Sub(lastHealthCheck) >= healthCheckInterval {
-				s.performHealthCheck()
-				lastHealthCheck = now
-			}
+			s.handleHealthCheck(now, &lastHealthCheck)
 
-			// Check for user activity (throttled to avoid excessive API calls)
-			if s.checkUserActivity() {
-				s.logger.Debug("User activity detected, resetting Teams activity timer")
-				continue
-			}
-
-			// Only attempt Teams activity if interval has elapsed
-			if !s.shouldSendTeamsActivity() {
-				continue
-			}
-
-			// Attempt Teams activity with error recovery
-			if err := s.safeTeamsActivity(ctx); err != nil {
-				// Check if this is user input deferral (not an actual failure)
-				if !errors.Is(err, ErrUserInputActive) {
-					// This is an actual failure
-					teamsMissingCount++
-					s.state.Mutex.Lock()
-					s.state.FailureStreak++
-					s.state.Mutex.Unlock()
-
-					if teamsMissingCount <= maxMissingLogs {
-						s.logger.Warn("Teams activity failed",
-							slog.String("error", err.Error()),
-							slog.Int("missing_count", teamsMissingCount),
-							slog.Int("failure_streak", s.state.FailureStreak))
-						if s.config.WebSocket {
-							websocket.Broadcast(&websocket.Event{
-								Service: "teams-green",
-								Status:  "warning",
-								PID:     s.state.PID,
-								Message: err.Error(),
-							}, s.state)
-						}
-					}
-
-					// Implement exponential backoff for excessive failures, but respect context
-					if s.state.FailureStreak > 10 {
-						backoffDuration := time.Duration(min(s.state.FailureStreak*2, 60)) * time.Second
-						s.logger.Info("Applying failure backoff", slog.Duration("duration", backoffDuration))
-
-						// Use context-aware sleep
-						select {
-						case <-ctx.Done():
-							s.logger.Info("Main loop stopping during backoff")
-							return
-						case <-time.After(backoffDuration):
-							// Continue with backoff
-						}
-					}
-				}
-				// If it's user input deferral, we just skip the success handling and continue the loop
-			} else {
-				// Success - update activity tracking and reset timer
-				s.resetTeamsActivityTimer()
-				s.state.Mutex.Lock()
-				s.state.LastActivity = time.Now()
-				// Avoid duplicate window enumeration - if SendKeysToTeams succeeded, at least 1 window exists
-				s.state.TeamsWindowCount = 1
-				if s.state.FailureStreak > 0 {
-					s.logger.Info("Teams activity resumed",
-						slog.Int("was_failure_streak", s.state.FailureStreak),
-						slog.Int("teams_windows", s.state.TeamsWindowCount))
-					if s.config.WebSocket {
-						websocket.Broadcast(&websocket.Event{
-							Service: "teams-green",
-							Status:  "running",
-							PID:     s.state.PID,
-							Message: fmt.Sprintf("Teams activity resumed (found %d windows)", s.state.TeamsWindowCount),
-						}, s.state)
-					}
-				}
-				s.state.FailureStreak = 0
-				s.state.Mutex.Unlock()
-				teamsMissingCount = 0
+			// Handle Teams activity (user activity already checked by activityTicker)
+			if err := s.handleTeamsActivity(ctx, &teamsMissingCount); err != nil {
+				s.handleFailure(ctx, err, teamsMissingCount)
 			}
 		}
 	}
@@ -296,9 +221,19 @@ func (s *Service) safeTeamsActivity(ctx context.Context) (err error) {
 	}
 }
 
-func (s *Service) checkUserActivity() bool {
+func (s *Service) handleHealthCheck(now time.Time, lastHealthCheck *time.Time) {
+	if now.Sub(*lastHealthCheck) >= healthCheckInterval {
+		s.performHealthCheck()
+		*lastHealthCheck = now
+	}
+}
+
+func (s *Service) handleUserActivity() bool {
+	// Create input detector for checking activity
+	inputDetector := NewInputDetector(s.logger)
+
 	// Check for active input without throttling to ensure accurate detection
-	if s.teamsMgr.isUserInputActive() {
+	if inputDetector.IsKeyPressed() || inputDetector.IsUserInputActive() {
 		now := time.Now()
 		s.activityCheckMutex.Lock()
 		s.lastUserActivity = now
@@ -306,20 +241,93 @@ func (s *Service) checkUserActivity() bool {
 		s.activityCheckMutex.Unlock()
 		return true
 	}
-
 	return false
+}
+
+func (s *Service) handleTeamsActivity(ctx context.Context, teamsMissingCount *int) error {
+	// Only attempt Teams activity if interval has elapsed
+	if !s.shouldSendTeamsActivity() {
+		return nil
+	}
+
+	// Attempt Teams activity with error recovery
+	if err := s.safeTeamsActivity(ctx); err != nil {
+		// Check if this is user input deferral (not an actual failure)
+		if !errors.Is(err, ErrUserInputActive) {
+			// This is an actual failure
+			*teamsMissingCount++
+			s.state.Mutex.Lock()
+			s.state.FailureStreak++
+			s.state.Mutex.Unlock()
+
+			return err
+		}
+		// User input detected during Teams activity - don't reset timer here
+		// Timer will be reset by handleUserActivity() on next iteration
+	} else {
+		// Success - update activity tracking and advance next scheduled activity
+		activityTime := time.Now()
+		// If there was a failure streak, log and broadcast before resetting to preserve prior value
+		if func() int { s.state.Mutex.RLock(); defer s.state.Mutex.RUnlock(); return s.state.FailureStreak }() > 0 {
+			s.state.Mutex.RLock()
+			prevStreak := s.state.FailureStreak
+			windowCount := s.state.TeamsWindowCount
+			s.state.Mutex.RUnlock()
+			s.logger.Info("Teams activity resumed",
+				slog.Int("was_failure_streak", prevStreak),
+				slog.Int("teams_windows", windowCount))
+			if s.config.WebSocket {
+				websocket.Broadcast(&websocket.Event{
+					Service: "teams-green",
+					Status:  "running",
+					PID:     s.state.PID,
+					Message: fmt.Sprintf("Teams activity resumed (found %d windows)", windowCount),
+				}, s.state)
+			}
+		}
+		// Atomic state + schedule update
+		s.updateActivityState(activityTime)
+		*teamsMissingCount = 0
+	}
+	return nil
+}
+
+func (s *Service) handleFailure(ctx context.Context, err error, teamsMissingCount int) {
+	if teamsMissingCount <= maxMissingLogs {
+		s.logger.Warn("Teams activity failed",
+			slog.String("error", err.Error()),
+			slog.Int("missing_count", teamsMissingCount),
+			slog.Int("failure_streak", s.state.FailureStreak))
+		if s.config.WebSocket {
+			websocket.Broadcast(&websocket.Event{
+				Service: "teams-green",
+				Status:  "warning",
+				PID:     s.state.PID,
+				Message: err.Error(),
+			}, s.state)
+		}
+	}
+
+	// Implement exponential backoff for excessive failures, but respect context
+	if s.state.FailureStreak > failureBackoffStart {
+		backoffDuration := time.Duration(min(s.state.FailureStreak*2, maxBackoffSeconds)) * time.Second
+		s.logger.Info("Applying failure backoff", slog.Duration("duration", backoffDuration))
+
+		// Use context-aware sleep
+		select {
+		case <-ctx.Done():
+			s.logger.Info("Main loop stopping during backoff")
+			return
+		case <-time.After(backoffDuration):
+			// Continue with backoff
+		}
+	}
 }
 
 func (s *Service) shouldSendTeamsActivity() bool {
 	s.activityCheckMutex.RLock()
 	defer s.activityCheckMutex.RUnlock()
 	return time.Now().After(s.nextTeamsActivity)
-}
-
-func (s *Service) resetTeamsActivityTimer() {
-	s.activityCheckMutex.Lock()
-	s.nextTeamsActivity = time.Now().Add(time.Duration(s.config.Interval) * time.Second)
-	s.activityCheckMutex.Unlock()
 }
 
 func (s *Service) performHealthCheck() {
@@ -335,7 +343,7 @@ func (s *Service) performHealthCheck() {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
-	if memStats.Alloc > 100*1024*1024 { // 100MB threshold
+	if memStats.Alloc > memoryThreshold { // 100MB threshold
 		s.logger.Warn("High memory usage detected",
 			slog.Uint64("alloc_mb", memStats.Alloc/1024/1024))
 		runtime.GC() // Force garbage collection
@@ -343,7 +351,7 @@ func (s *Service) performHealthCheck() {
 
 	// Check goroutine count
 	goroutineCount := runtime.NumGoroutine()
-	if goroutineCount > 50 {
+	if goroutineCount > goroutineThreshold {
 		s.logger.Warn("High goroutine count", slog.Int("count", goroutineCount))
 	}
 
@@ -368,7 +376,7 @@ func (s *Service) Run() error {
 	// Start WebSocket server if enabled
 	if s.config.WebSocket {
 		if err := websocket.StartServer(s.config.Port, s.state); err != nil {
-			return fmt.Errorf("failed to start WebSocket server: %v", err)
+			return fmt.Errorf("failed to start WebSocket server: %w", err)
 		}
 
 		// Graceful server shutdown
@@ -395,6 +403,6 @@ func (s *Service) Run() error {
 	// Properly close log files
 	config.CloseLogFile()
 
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(shutdownSleep)
 	return nil
 }

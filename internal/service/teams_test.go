@@ -4,13 +4,13 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sync"
 	"syscall"
 	"testing"
 	"unsafe"
 
 	"github.com/joncrangle/teams-green/internal/config"
 	"github.com/joncrangle/teams-green/internal/websocket"
-	"github.com/lxn/win"
 )
 
 func TestEnumWindowsProcValidation(t *testing.T) {
@@ -57,25 +57,29 @@ func TestEnumWindowsProcValidation(t *testing.T) {
 		})
 	}
 
-	t.Run("context with nil hwnds should return early", func(t *testing.T) {
+	t.Run("context with nil windows should return early", func(t *testing.T) {
+		var mutex sync.Mutex
 		ctx := &WindowEnumContext{
-			hwnds:            nil,
+			windows:          nil,
 			teamsExecutables: []string{"teams.exe"},
 			logger:           logger,
+			mutex:            &mutex,
 		}
 
 		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
 		if got != 1 {
-			t.Errorf("enumWindowsProc() with nil hwnds = %v, want 1", got)
+			t.Errorf("enumWindowsProc() with nil windows = %v, want 1", got)
 		}
 	})
 
 	t.Run("context with nil teamsExecutables should return early", func(t *testing.T) {
-		var hwnds []win.HWND
+		var windows []WindowInfo
+		var mutex sync.Mutex
 		ctx := &WindowEnumContext{
-			hwnds:            &hwnds,
+			windows:          &windows,
 			teamsExecutables: nil,
 			logger:           logger,
+			mutex:            &mutex,
 		}
 
 		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
@@ -85,11 +89,13 @@ func TestEnumWindowsProcValidation(t *testing.T) {
 	})
 
 	t.Run("context with nil logger should return early", func(t *testing.T) {
-		var hwnds []win.HWND
+		var windows []WindowInfo
+		var mutex sync.Mutex
 		ctx := &WindowEnumContext{
-			hwnds:            &hwnds,
+			windows:          &windows,
 			teamsExecutables: []string{"teams.exe"},
 			logger:           nil,
+			mutex:            &mutex,
 		}
 
 		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
@@ -99,11 +105,13 @@ func TestEnumWindowsProcValidation(t *testing.T) {
 	})
 
 	t.Run("valid context should proceed", func(t *testing.T) {
-		var hwnds []win.HWND
+		var windows []WindowInfo
+		var mutex sync.Mutex
 		ctx := &WindowEnumContext{
-			hwnds:            &hwnds,
+			windows:          &windows,
 			teamsExecutables: []string{"notepad.exe"},
 			logger:           logger,
+			mutex:            &mutex,
 		}
 
 		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
@@ -118,11 +126,13 @@ func TestTeamsManagerFindTeamsWindows(t *testing.T) {
 		Level: slog.LevelDebug,
 	}))
 
-	var hwnds []win.HWND
+	var windows []WindowInfo
+	var mutex sync.Mutex
 	enumContext := &WindowEnumContext{
-		hwnds:            &hwnds,
-		teamsExecutables: getTeamsExecutables(),
+		windows:          &windows,
+		teamsExecutables: teamsExecutables,
 		logger:           logger,
+		mutex:            &mutex,
 	}
 
 	tm := &TeamsManager{
@@ -149,10 +159,15 @@ func TestTeamsManagerFindTeamsWindows(t *testing.T) {
 }
 
 func TestIsKeyPressed(t *testing.T) {
-	result := isKeyPressed()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
+	inputDetector := NewInputDetector(logger)
+	result := inputDetector.IsKeyPressed()
 
 	if result != true && result != false {
-		t.Errorf("isKeyPressed() returned %v, expected boolean", result)
+		t.Errorf("IsKeyPressed() returned %v, expected boolean", result)
 	}
 }
 
@@ -161,27 +176,24 @@ func TestTeamsManagerIsUserInputActive(t *testing.T) {
 		Level: slog.LevelDebug,
 	}))
 
-	tm := &TeamsManager{
-		logger: logger,
-	}
+	inputDetector := NewInputDetector(logger)
 
-	result := tm.isUserInputActive()
+	result := inputDetector.IsUserInputActive()
 
 	if result != true && result != false {
-		t.Errorf("isUserInputActive() returned %v, expected boolean", result)
+		t.Errorf("IsUserInputActive() returned %v, expected boolean", result)
 	}
 }
 
-func TestSendKeyToWindow(t *testing.T) {
-	const vkF15 = 0x7E
-
-	err := sendKeyToWindow(win.HWND(0), vkF15)
-
-	if err == nil {
-		t.Log("sendKeyToWindow() succeeded")
-	} else {
-		t.Logf("sendKeyToWindow() failed: %v", err)
-	}
+// TestActivityModeGlobal ensures global mode path returns quickly
+func TestActivityModeGlobal(t *testing.T) {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	cfg := &config.Config{ActivityMode: "global"}
+	tm := newTeamsManager(logger, cfg)
+	ctx := context.Background()
+	state := &websocket.ServiceState{}
+	_ = tm.SendKeysToTeams(ctx, state) // We don't assert success due to environment constraints
 }
 
 func TestTeamsManagerHandleTeamsNotFound(t *testing.T) {
@@ -191,9 +203,6 @@ func TestTeamsManagerHandleTeamsNotFound(t *testing.T) {
 
 	tm := &TeamsManager{
 		logger: logger,
-		retryState: &RetryState{
-			FailureCount: 0,
-		},
 	}
 
 	state := &websocket.ServiceState{}
@@ -202,10 +211,6 @@ func TestTeamsManagerHandleTeamsNotFound(t *testing.T) {
 
 	if err == nil {
 		t.Error("handleTeamsNotFound() should return an error")
-	}
-
-	if tm.retryState.FailureCount != 1 {
-		t.Errorf("handleTeamsNotFound() should increment FailureCount, got %d, want 1", tm.retryState.FailureCount)
 	}
 
 	expectedErrorMsg := "no Teams windows found"
@@ -219,13 +224,6 @@ func TestTeamsManagerSendKeysToTeams(t *testing.T) {
 		Level: slog.LevelDebug,
 	}))
 
-	var hwnds []win.HWND
-	enumContext := &WindowEnumContext{
-		hwnds:            &hwnds,
-		teamsExecutables: getTeamsExecutables(),
-		logger:           logger,
-	}
-
 	cfg := &config.Config{
 		Debug:             false,
 		Interval:          180,
@@ -236,12 +234,7 @@ func TestTeamsManagerSendKeysToTeams(t *testing.T) {
 		KeyProcessDelayMs: 10,
 	}
 
-	tm := &TeamsManager{
-		logger:      logger,
-		enumContext: enumContext,
-		config:      cfg,
-		retryState:  &RetryState{},
-	}
+	tm := newTeamsManager(logger, cfg)
 
 	ctx := context.Background()
 	state := &websocket.ServiceState{}
@@ -260,13 +253,6 @@ func TestTeamsManagerSendKeysToTeamsCancelled(t *testing.T) {
 		Level: slog.LevelDebug,
 	}))
 
-	var hwnds []win.HWND
-	enumContext := &WindowEnumContext{
-		hwnds:            &hwnds,
-		teamsExecutables: getTeamsExecutables(),
-		logger:           logger,
-	}
-
 	cfg := &config.Config{
 		Debug:             false,
 		Interval:          180,
@@ -278,10 +264,8 @@ func TestTeamsManagerSendKeysToTeamsCancelled(t *testing.T) {
 	}
 
 	tm := &TeamsManager{
-		logger:      logger,
-		enumContext: enumContext,
-		config:      cfg,
-		retryState:  &RetryState{},
+		logger: logger,
+		config: cfg,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

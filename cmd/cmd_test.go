@@ -141,6 +141,13 @@ func TestRunCommand(t *testing.T) {
 }
 
 func TestConfigInitialization(t *testing.T) {
+	// Save original global config
+	originalCfg := cfg
+	defer func() { cfg = originalCfg }()
+
+	// Reset config for testing
+	cfg = &config.Config{}
+
 	if cfg == nil {
 		t.Fatal("global config should not be nil")
 	}
@@ -164,9 +171,6 @@ func TestConfigInitialization(t *testing.T) {
 	testCmd.Flags().IntVarP(&cfg.Interval, "interval", "i", 180, "Loop interval in seconds")
 	testCmd.Flags().BoolVarP(&cfg.WebSocket, "websocket", "w", false, "Enable WebSocket server")
 	testCmd.Flags().IntVarP(&cfg.Port, "port", "p", 8765, "WebSocket server port")
-
-	// Reset config to defaults
-	cfg = &config.Config{}
 
 	// Test that defaults are set correctly
 	if err := testCmd.ParseFlags([]string{}); err != nil {

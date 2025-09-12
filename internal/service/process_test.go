@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -238,5 +239,33 @@ func TestStatusInfo(t *testing.T) {
 
 	if info.LastActivity.IsZero() {
 		t.Error("last activity should not be zero")
+	}
+}
+
+func TestWritePidFileAtomic(t *testing.T) {
+	// Ensure clean state
+	_ = os.Remove(config.PidFile)
+
+	firstPID := os.Getpid()
+	if err := writePidFile(firstPID); err != nil {
+		t.Fatalf("first writePidFile failed: %v", err)
+	}
+	defer os.Remove(config.PidFile)
+
+	secondPID := firstPID + 1
+	err := writePidFile(secondPID)
+	if err == nil {
+		t.Fatal("expected error on second writePidFile call for existing pid file")
+	}
+	if !strings.Contains(err.Error(), "pid file already exists") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	content, readErr := os.ReadFile(config.PidFile)
+	if readErr != nil {
+		t.Fatalf("failed to read pid file: %v", readErr)
+	}
+	if strings.TrimSpace(string(content)) != strconv.Itoa(firstPID) {
+		t.Fatalf("pid file content changed unexpectedly: %s", string(content))
 	}
 }

@@ -1,9 +1,11 @@
 package config
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -353,6 +355,37 @@ func TestPidFileInitialization(t *testing.T) {
 
 	if filepath.Base(PidFile) != "teams-green.pid" {
 		t.Errorf("PidFile should end with teams-green.pid, got %s", PidFile)
+	}
+}
+
+func TestConfigValidationPortUnavailable(t *testing.T) {
+	// Acquire a real listener to hold a port open
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("failed to open ephemeral listener: %v", err)
+	}
+	defer ln.Close()
+
+	addr := ln.Addr().String()
+	// addr is like 127.0.0.1:54321 or [::]:54321, split on last colon
+	portStr := addr[strings.LastIndex(addr, ":")+1:]
+	port, convErr := strconv.Atoi(portStr)
+	if convErr != nil {
+		t.Fatalf("failed to parse port from %s: %v", addr, convErr)
+	}
+
+	cfg := Config{ // WebSocket enabled with in-use port
+		WebSocket: true,
+		Port:      port,
+		Interval:  180,
+	}
+
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatalf("expected validation error for in-use port %d", port)
+	}
+	if !strings.Contains(err.Error(), "port ") || !strings.Contains(err.Error(), " is unavailable") {
+		t.Fatalf("unexpected validation error message: %v", err)
 	}
 }
 

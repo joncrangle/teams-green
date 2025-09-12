@@ -1,4 +1,5 @@
 // Package cmd implements the command-line interface for the teams-green application.
+// It provides commands for starting, stopping, and monitoring the Teams-Green service.
 package cmd
 
 import (
@@ -14,12 +15,23 @@ import (
 
 var cfg = &config.Config{}
 
+// CLI constants
+const (
+	defaultIntervalSeconds = 180
+	defaultWebSocketPort   = 8765
+	defaultLogMaxSizeMB    = 10
+	defaultLogMaxAgeDays   = 30
+	defaultFocusDelayMs    = 150
+	defaultRestoreDelayMs  = 100
+	defaultKeyDelayMs      = 150
+)
+
 var rootCmd = &cobra.Command{
 	Use:   "teams-green",
 	Short: "Keep that Teams status green",
 	Long: `Teams-Green keeps your Microsoft Teams status active by sending 
 periodic keys to prevent the status from going idle.`,
-	Version: "0.3.4",
+	Version: "0.4.0",
 }
 
 var versionCmd = &cobra.Command{
@@ -153,29 +165,31 @@ var runCmd = &cobra.Command{
 	},
 }
 
-// addConfigFlags adds all configuration flags to a command
+// addConfigFlags adds all configuration flags to a command.
+// includeShortcuts determines whether to include short flag aliases for common options.
 func addConfigFlags(cmd *cobra.Command, includeShortcuts bool) {
 	if includeShortcuts {
 		cmd.Flags().BoolVarP(&cfg.Debug, "debug", "d", false, "Run in foreground with debug logging")
-		cmd.Flags().IntVarP(&cfg.Interval, "interval", "i", 180, "Loop interval in seconds")
+		cmd.Flags().IntVarP(&cfg.Interval, "interval", "i", defaultIntervalSeconds, "Loop interval in seconds")
 		cmd.Flags().BoolVarP(&cfg.WebSocket, "websocket", "w", false, "Enable WebSocket server")
-		cmd.Flags().IntVarP(&cfg.Port, "port", "p", 8765, "WebSocket server port")
+		cmd.Flags().IntVarP(&cfg.Port, "port", "p", defaultWebSocketPort, "WebSocket server port")
 	} else {
 		cmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Debug mode")
-		cmd.Flags().IntVar(&cfg.Interval, "interval", 180, "Loop interval in seconds")
+		cmd.Flags().IntVar(&cfg.Interval, "interval", defaultIntervalSeconds, "Loop interval in seconds")
 		cmd.Flags().BoolVar(&cfg.WebSocket, "websocket", false, "Enable WebSocket server")
-		cmd.Flags().IntVar(&cfg.Port, "port", 8765, "WebSocket server port")
+		cmd.Flags().IntVar(&cfg.Port, "port", defaultWebSocketPort, "WebSocket server port")
 	}
 
 	// Common flags for all commands
 	cmd.Flags().StringVar(&cfg.LogFormat, "log-format", "text", "Log format (text or json)")
 	cmd.Flags().StringVar(&cfg.LogFile, "log-file", "", "Log file path (empty for no file logging)")
 	cmd.Flags().BoolVar(&cfg.LogRotate, "log-rotate", false, "Enable log file rotation")
-	cmd.Flags().IntVar(&cfg.MaxLogSize, "max-log-size", 10, "Maximum log file size in MB")
-	cmd.Flags().IntVar(&cfg.MaxLogAge, "max-log-age", 30, "Maximum log file age in days")
-	cmd.Flags().IntVar(&cfg.FocusDelayMs, "focus-delay", 150, "Delay after setting focus before sending key (milliseconds)")
-	cmd.Flags().IntVar(&cfg.RestoreDelayMs, "restore-delay", 100, "Delay after restoring minimized window (milliseconds)")
-	cmd.Flags().IntVar(&cfg.KeyProcessDelayMs, "key-process-delay", 150, "Delay before restoring original focus (milliseconds)")
+	cmd.Flags().IntVar(&cfg.MaxLogSize, "max-log-size", defaultLogMaxSizeMB, "Maximum log file size in MB")
+	cmd.Flags().IntVar(&cfg.MaxLogAge, "max-log-age", defaultLogMaxAgeDays, "Maximum log file age in days")
+	cmd.Flags().IntVar(&cfg.FocusDelayMs, "focus-delay", defaultFocusDelayMs, "Delay after setting focus before sending key (milliseconds)")
+	cmd.Flags().IntVar(&cfg.RestoreDelayMs, "restore-delay", defaultRestoreDelayMs, "Delay after restoring minimized window (milliseconds)")
+	cmd.Flags().IntVar(&cfg.KeyProcessDelayMs, "key-process-delay", defaultKeyDelayMs, "Delay before restoring original focus (milliseconds)")
+	cmd.Flags().StringVar(&cfg.ActivityMode, "activity-mode", "focus", "Activity mode: 'focus' (bring Teams forward) or 'global' (send key without focus change)")
 }
 
 func init() {
@@ -193,6 +207,7 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 }
 
+// Execute runs the root command and handles any errors by exiting with code 1.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
