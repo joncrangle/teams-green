@@ -52,6 +52,7 @@ func Broadcast(e *Event, state *ServiceState) {
 	// Broadcast to all clients and clean up disconnected ones
 	disconnectedCount := 0
 	for conn := range state.Clients {
+		// Simple connection validation - try to send
 		if err := websocket.Message.Send(conn, msg); err != nil {
 			state.Logger.Debug("WebSocket client disconnected during broadcast, cleaning up",
 				slog.String("error", err.Error()))

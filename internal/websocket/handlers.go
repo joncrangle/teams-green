@@ -23,12 +23,9 @@ type Event struct {
 }
 
 const (
-	maxConnections    = 50                // Limit concurrent connections
-	maxMessageSize    = 1024              // 1KB message limit
-	readTimeout       = 120 * time.Second // 2 minutes - increased for stability
-	writeTimeout      = 30 * time.Second  // 30 seconds for writes
-	pingInterval      = 30 * time.Second  // Send ping every 30 seconds
-	keepAliveInterval = 45 * time.Second  // Send keep-alive message every 45 seconds
+	maxConnections = 50               // Limit concurrent connections
+	readTimeout    = 30 * time.Second // 30 seconds - client reconnects every 5s on failure
+	writeTimeout   = 30 * time.Second // 30 seconds for writes
 )
 
 var activeConnections int32 // Atomic counter for active connections
@@ -46,11 +43,6 @@ func HandleConnection(ws *websocket.Conn, state *ServiceState) {
 
 	// Set up cleanup handler
 	defer cleanupClientConnection(ws, state)
-
-	// Start background handlers
-	done := make(chan struct{})
-	defer close(done)
-	go keepAliveHandler(ws, state, done)
 
 	// Handle incoming messages
 	handleClientMessages(ws, state)
@@ -72,9 +64,6 @@ func checkConnectionLimit(ws *websocket.Conn, state *ServiceState) bool {
 
 // setupClientConnection registers the client and sends the current service state.
 func setupClientConnection(ws *websocket.Conn, state *ServiceState) {
-	// Set message size limit
-	ws.MaxPayloadBytes = maxMessageSize
-
 	// Register client
 	state.Mutex.Lock()
 	state.Clients[ws] = true
@@ -93,11 +82,11 @@ func setupClientConnection(ws *websocket.Conn, state *ServiceState) {
 // sendInitialState sends the current service status to a newly connected client.
 func sendInitialState(ws *websocket.Conn, state *ServiceState) {
 	currentEvent := Event{
-		Service: "teams-green",
-		Status:  state.State,
-		PID:     state.PID,
-		Message: "Connected to service",
-		Type:    "status",
+		Service:   "teams-green",
+		Status:    state.State,
+		PID:       state.PID,
+		Type:      "status",
+		Timestamp: time.Now(),
 	}
 	if msg, err := json.Marshal(currentEvent); err == nil {
 		_ = sendMessageWithTimeout(ws, string(msg), writeTimeout)
@@ -135,14 +124,6 @@ func handleClientMessages(ws *websocket.Conn, state *ServiceState) {
 			return
 		}
 
-		if len(msg) > maxMessageSize {
-			state.Logger.Warn("WebSocket message too large",
-				slog.Int("size", len(msg)),
-				slog.Int("max", maxMessageSize),
-				slog.String("remote_addr", ws.Request().RemoteAddr))
-			continue
-		}
-
 		// Process the message
 		if err := handleMessage(ws, msg, state); err != nil {
 			state.Logger.Debug("Error handling message",
@@ -177,39 +158,7 @@ func sendMessageWithTimeout(ws *websocket.Conn, msg string, timeout time.Duratio
 	return websocket.Message.Send(ws, msg)
 }
 
-// keepAliveHandler sends periodic keep-alive messages to maintain connection health.
-// It runs in a separate goroutine and stops when the done channel is closed.
-func keepAliveHandler(ws *websocket.Conn, state *ServiceState, done <-chan struct{}) {
-	keepAliveTicker := time.NewTicker(keepAliveInterval)
-	defer keepAliveTicker.Stop()
-
-	for {
-		select {
-		case <-done:
-			return
-		case <-keepAliveTicker.C:
-			keepAliveEvent := Event{
-				Service:   "teams-green",
-				Status:    "alive",
-				PID:       state.PID,
-				Message:   "Keep-alive",
-				Type:      "keepalive",
-				Timestamp: time.Now(),
-			}
-
-			if msg, err := json.Marshal(keepAliveEvent); err == nil {
-				if err := sendMessageWithTimeout(ws, string(msg), writeTimeout); err != nil {
-					state.Logger.Debug("Failed to send keep-alive",
-						slog.String("error", err.Error()),
-						slog.String("remote_addr", ws.Request().RemoteAddr))
-					return
-				}
-			}
-		}
-	}
-}
-
-// handleMessage processes incoming WebSocket messages, handling ping/pong and other control messages.
+// handleMessage processes incoming WebSocket messages.
 func handleMessage(ws *websocket.Conn, msg string, state *ServiceState) error {
 	// Try to parse as JSON event
 	var event Event
@@ -218,10 +167,8 @@ func handleMessage(ws *websocket.Conn, msg string, state *ServiceState) error {
 		return nil
 	}
 
-	// Handle different message types
-	switch event.Type {
-	case "ping":
-		// Respond with pong
+	// Handle ping messages by sending a pong response (for client compatibility)
+	if event.Type == "ping" {
 		pongEvent := Event{
 			Service:   "teams-green",
 			Status:    state.State,
@@ -233,10 +180,6 @@ func handleMessage(ws *websocket.Conn, msg string, state *ServiceState) error {
 		if pongMsg, err := json.Marshal(pongEvent); err == nil {
 			return sendMessageWithTimeout(ws, string(pongMsg), writeTimeout)
 		}
-	case "pong":
-		// Client responded to our ping, connection is healthy
-		state.Logger.Debug("Received pong from client",
-			slog.String("remote_addr", ws.Request().RemoteAddr))
 	}
 
 	return nil
@@ -253,12 +196,9 @@ func isTimeoutError(err error) bool {
 // GetConnectionStats returns current WebSocket connection statistics and configuration.
 func GetConnectionStats() map[string]any {
 	return map[string]any{
-		"active_connections":         atomic.LoadInt32(&activeConnections),
-		"max_connections":            maxConnections,
-		"max_message_size":           maxMessageSize,
-		"ping_interval_seconds":      int(pingInterval.Seconds()),
-		"keepalive_interval_seconds": int(keepAliveInterval.Seconds()),
-		"read_timeout_seconds":       int(readTimeout.Seconds()),
-		"write_timeout_seconds":      int(writeTimeout.Seconds()),
+		"active_connections":    atomic.LoadInt32(&activeConnections),
+		"max_connections":       maxConnections,
+		"read_timeout_seconds":  int(readTimeout.Seconds()),
+		"write_timeout_seconds": int(writeTimeout.Seconds()),
 	}
 }

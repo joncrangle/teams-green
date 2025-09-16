@@ -43,7 +43,7 @@ func TestFocusSuppressionThresholdAndWindow(t *testing.T) {
 	}
 
 	// Record failures below threshold
-	for range focusFailureThreshold-1 {
+	for range focusFailureThreshold - 1 {
 		tm.recordFocusFailure(hwnd, fgPID)
 	}
 	if tm.shouldSuppressFocus(hwnd, fgPID) {
