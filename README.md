@@ -91,7 +91,7 @@ teams-green start --debug --focus-delay 50 --key-process-delay 150 --log-file de
 
 ### WebSocket API
 
-When WebSocket is enabled, connect to `ws://127.0.0.1:8765/ws` to receive real-time events:
+When WebSocket is enabled, connect to `ws://127.0.0.1:8765` to receive real-time events:
 
 ```json
 {
@@ -104,19 +104,36 @@ When WebSocket is enabled, connect to `ws://127.0.0.1:8765/ws` to receive real-t
 }
 ```
 
+#### Security & Connection Management
+
+- **Localhost Only**: WebSocket server only accepts connections from 127.0.0.1/localhost for security
+- **Origin Validation**: Validates Origin headers to prevent cross-site WebSocket hijacking
+- **Connection Limits**: Maximum 50 concurrent connections to prevent resource exhaustion
+- **Automatic Cleanup**: Disconnected clients are automatically removed from the registry
+
 #### Connection Stability Features
 
 - **Keep-Alive Messages**: Automatic keep-alive messages every 45 seconds to maintain connection
 - **Ping/Pong Support**: Send `{"type": "ping"}` to test connection health
-- **Extended Timeouts**: 2-minute read timeout and 5-minute idle timeout for better stability
+- **Extended Timeouts**: 30-second read/write timeouts with 5-minute idle timeout for stability
 - **Graceful Error Handling**: Timeout errors logged at debug level to reduce noise
+- **Automatic Reconnection**: Clients should implement reconnection logic for best results
 
 #### Message Types
 
-- `status` - Service state changes
-- `keepalive` - Periodic keep-alive messages
-- `ping` - Connection health check request
-- `pong` - Response to ping messages
+- `status` - Service state changes and initial connection state
+- `keepalive` - Periodic keep-alive messages (reserved for future use)
+- `ping` - Connection health check request from client
+- `pong` - Response to ping messages from server
+
+#### Event Broadcasting
+
+The WebSocket server automatically broadcasts events to all connected clients when:
+- Service starts or stops
+- Service state changes
+- Key activity is performed (when debug logging is enabled)
+
+Events are broadcast using an efficient buffer pool system for optimal memory usage.
 
 ## Configuration
 
@@ -181,7 +198,7 @@ teams-green/
 ├── internal/
 │   ├── config/         # Configuration and logging setup
 │   ├── service/        # Core service logic and Windows integration
-│   └── websocket/      # WebSocket server and broadcasting
+│   └── websocket/      # WebSocket server, client management, and event broadcasting
 ├── .golangci.yml       # Linting configuration
 ├── .goreleaser.yaml    # Release configuration
 └── main.go             # Application entry point
@@ -244,17 +261,20 @@ Teams-Green works by:
 - **Smart Timer Reset**: When activity is detected, the full interval timer is reset (e.g., if interval is 180s, timer resets to 180s from current time)
 
 ### WebSocket Connection Issues
-- **Frequent Disconnections**: The improved WebSocket implementation includes keep-alive messages and extended timeouts to reduce disconnections
+- **Security Restrictions**: WebSocket server only accepts localhost connections (127.0.0.1) with validated origins
+- **Connection Limits**: Maximum 50 concurrent connections - additional connections will be rejected
+- **Frequent Disconnections**: The WebSocket implementation includes keep-alive messages and extended timeouts to reduce disconnections
 - **Timeout Errors**: These are now logged at debug level - use `--debug` flag to see detailed connection information
 - Verify the port is not in use: `netstat -an | findstr 8765`
 - Try a different port: `teams-green start --websocket --port 9000`
 - Check Windows Firewall settings
 
 ### Connection Health Monitoring
-- WebSocket connections send keep-alive messages every 45 seconds
-- Clients can send ping messages to test connection health
-- Extended timeouts (2 minutes read, 5 minutes idle) improve stability
-- Connection limits: Maximum 50 concurrent connections
+- WebSocket connections support ping/pong for health checking
+- Clients can send `{"type": "ping"}` to test connection health
+- Server responds with `{"type": "pong"}` messages
+- Extended timeouts (30 seconds read/write, 5 minutes idle) improve stability
+- Automatic client cleanup removes disconnected connections
 
 ### Fine-Tuning Timing
 
