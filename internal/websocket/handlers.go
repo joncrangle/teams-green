@@ -192,13 +192,3 @@ func isTimeoutError(err error) bool {
 	}
 	return strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "i/o timeout")
 }
-
-// GetConnectionStats returns current WebSocket connection statistics and configuration.
-func GetConnectionStats() map[string]any {
-	return map[string]any{
-		"active_connections":    atomic.LoadInt32(&activeConnections),
-		"max_connections":       maxConnections,
-		"read_timeout_seconds":  int(readTimeout.Seconds()),
-		"write_timeout_seconds": int(writeTimeout.Seconds()),
-	}
-}
