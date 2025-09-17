@@ -113,8 +113,8 @@ When WebSocket is enabled, connect to `ws://127.0.0.1:8765` to receive real-time
 
 #### Connection Stability Features
 
-- **Keep-Alive Messages**: Automatic keep-alive messages every 45 seconds to maintain connection
-- **Ping/Pong Support**: Send `{"type": "ping"}` to test connection health
+- **Ping/Pong Support**: Send `{"type": "ping"}` to test connection health - server responds with `{"type": "pong"}`
+- **Read Timeouts**: 30-second read timeout to detect inactive connections
 - **Extended Timeouts**: 30-second read/write timeouts with 5-minute idle timeout for stability
 - **Graceful Error Handling**: Timeout errors logged at debug level to reduce noise
 - **Automatic Reconnection**: Clients should implement reconnection logic for best results
@@ -122,7 +122,6 @@ When WebSocket is enabled, connect to `ws://127.0.0.1:8765` to receive real-time
 #### Message Types
 
 - `status` - Service state changes and initial connection state
-- `keepalive` - Periodic keep-alive messages (reserved for future use)
 - `ping` - Connection health check request from client
 - `pong` - Response to ping messages from server
 
@@ -145,13 +144,13 @@ The service accepts the following flags:
 | `--interval`          | `-i`  | `180`   | Activity interval in seconds                      |
 | `--websocket`         | `-w`  | `false` | Enable WebSocket server                           |
 | `--port`              | `-p`  | `8765`  | WebSocket server port                             |
-| `--focus-delay`       |       | `150`    | Delay after setting focus before sending key (ms) |
-| `--restore-delay`     |       | `100`    | Delay after restoring minimized window (ms)       |
+| `--focus-delay`       |       | `150`   | Delay after setting focus before sending key (ms) |
+| `--restore-delay`     |       | `100`   | Delay after restoring minimized window (ms)       |
 | `--key-process-delay` |       | `150`   | Delay before restoring original focus (ms)        |
 | `--activity-mode`     |       | `focus` | Activity mode: 'focus' (bring Teams forward) or 'global' (no focus change) |
 | `--log-format`        |       | `text`  | Log format: text or json                          |
 | `--log-file`          |       | ``      | Log file path (empty = no file logging)           |
-| `--log-rotate`        |       | `falsmse` | Enable log rotation                               |
+| `--log-rotate`        |       | `false` | Enable log rotation                               |
 | `--max-log-size`      |       | `10`    | Maximum log file size in MB                       |
 | `--max-log-age`       |       | `30`    | Maximum log file age in days                      |
 
