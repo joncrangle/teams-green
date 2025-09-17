@@ -5,7 +5,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/joncrangle/teams-green/internal/config"
 	"github.com/joncrangle/teams-green/internal/service"
@@ -31,7 +30,7 @@ var rootCmd = &cobra.Command{
 	Short: "Keep that Teams status green",
 	Long: `Teams-Green keeps your Microsoft Teams status active by sending 
 periodic keys to prevent the status from going idle.`,
-	Version: "0.4.0",
+	Version: "0.4.1",
 }
 
 var versionCmd = &cobra.Command{
@@ -100,16 +99,6 @@ var statusCmd = &cobra.Command{
 				fmt.Printf("   📊 Teams windows: %d\n", info.TeamsWindowCount)
 				if info.FailureStreak > 0 {
 					fmt.Printf("   ⚠️  Failure streak: %d\n", info.FailureStreak)
-				}
-				if !info.LastActivity.IsZero() {
-					timeSince := time.Since(info.LastActivity)
-					if timeSince < time.Minute {
-						fmt.Printf("   🕒 Last activity: %ds ago\n", int(timeSince.Seconds()))
-					} else if timeSince < time.Hour {
-						fmt.Printf("   🕒 Last activity: %dm ago\n", int(timeSince.Minutes()))
-					} else {
-						fmt.Printf("   🕒 Last activity: %s ago\n", timeSince.Truncate(time.Minute))
-					}
 				}
 			}
 		} else {

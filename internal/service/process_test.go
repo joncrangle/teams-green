@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/joncrangle/teams-green/internal/config"
 )
@@ -224,7 +223,6 @@ func TestStopServiceNotRunningProcess(t *testing.T) {
 
 func TestStatusInfo(t *testing.T) {
 	info := &StatusInfo{
-		LastActivity:     time.Now(),
 		TeamsWindowCount: 3,
 		FailureStreak:    1,
 	}
@@ -235,10 +233,6 @@ func TestStatusInfo(t *testing.T) {
 
 	if info.FailureStreak != 1 {
 		t.Errorf("expected failure streak 1, got %d", info.FailureStreak)
-	}
-
-	if info.LastActivity.IsZero() {
-		t.Error("last activity should not be zero")
 	}
 }
 

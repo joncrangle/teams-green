@@ -242,7 +242,6 @@ func GetEnhancedStatus() (bool, int, *StatusInfo, error) {
 		teamsWindowCount := getTeamsWindowCountForStatus()
 
 		info := &StatusInfo{
-			LastActivity:     time.Now(), // Default to now if we can't get actual info
 			TeamsWindowCount: teamsWindowCount,
 			FailureStreak:    0, // Can't get this from external process
 		}
@@ -258,9 +257,8 @@ func GetEnhancedStatus() (bool, int, *StatusInfo, error) {
 
 // StatusInfo contains detailed information about the service's current state.
 type StatusInfo struct {
-	LastActivity     time.Time // Timestamp of the last Teams activity
-	TeamsWindowCount int       // Number of detected Teams windows
-	FailureStreak    int       // Current failure streak count
+	TeamsWindowCount int // Number of detected Teams windows
+	FailureStreak    int // Current failure streak count
 }
 
 // getTeamsWindowCountForStatus detects Teams windows for status reporting.
