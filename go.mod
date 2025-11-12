@@ -1,6 +1,6 @@
 module github.com/joncrangle/teams-green
 
-go 1.25.0
+go 1.25.4
 
 require (
 	github.com/lxn/win v0.0.0-20210218163916-a377121e959e
