@@ -16,7 +16,7 @@ var cfg = &config.Config{}
 
 // CLI constants
 const (
-	defaultIntervalSeconds = 180
+	defaultIntervalSeconds = 150 // 2.5 minutes
 	defaultWebSocketPort   = 8765
 	defaultLogMaxSizeMB    = 10
 	defaultLogMaxAgeDays   = 30
@@ -30,7 +30,7 @@ var rootCmd = &cobra.Command{
 	Short: "Keep that Teams status green",
 	Long: `Teams-Green keeps your Microsoft Teams status active by sending 
 periodic keys to prevent the status from going idle.`,
-	Version: "0.4.1",
+	Version: "0.5.0",
 }
 
 var versionCmd = &cobra.Command{
@@ -178,6 +178,7 @@ func addConfigFlags(cmd *cobra.Command, includeShortcuts bool) {
 	cmd.Flags().IntVar(&cfg.FocusDelayMs, "focus-delay", defaultFocusDelayMs, "Delay after setting focus before sending key (milliseconds)")
 	cmd.Flags().IntVar(&cfg.RestoreDelayMs, "restore-delay", defaultRestoreDelayMs, "Delay after restoring minimized window (milliseconds)")
 	cmd.Flags().IntVar(&cfg.KeyProcessDelayMs, "key-process-delay", defaultKeyDelayMs, "Delay before restoring original focus (milliseconds)")
+	cmd.Flags().IntVar(&cfg.InputThresholdMs, "input-threshold", 2000, "Consider input active if occurred within this many milliseconds")
 	cmd.Flags().StringVar(&cfg.ActivityMode, "activity-mode", "focus", "Activity mode: 'focus' (bring Teams forward) or 'global' (send key without focus change)")
 }
 

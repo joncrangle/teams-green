@@ -20,6 +20,7 @@ import (
 
 var (
 	user32                       = windows.NewLazySystemDLL("user32.dll")
+	kernel32                     = windows.NewLazySystemDLL("kernel32.dll")
 	procEnumWindows              = user32.NewProc("EnumWindows")
 	procGetWindowThreadProcessID = user32.NewProc("GetWindowThreadProcessId")
 	procIsWindowVisible          = user32.NewProc("IsWindowVisible")
@@ -28,11 +29,10 @@ var (
 	procIsIconic                 = user32.NewProc("IsIconic")
 	procIsZoomed                 = user32.NewProc("IsZoomed")
 	procShowWindow               = user32.NewProc("ShowWindow")
-	procGetAsyncKeyState         = user32.NewProc("GetAsyncKeyState")
 	procBringWindowToTop         = user32.NewProc("BringWindowToTop")
 	procAllowSetForegroundWindow = user32.NewProc("AllowSetForegroundWindow")
 	procAttachThreadInput        = user32.NewProc("AttachThreadInput")
-	procGetCurrentThreadID       = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThreadId")
+	procGetCurrentThreadID       = kernel32.NewProc("GetCurrentThreadId")
 	procGetWindowLong            = user32.NewProc("GetWindowLongW")
 	procSetWindowPos             = user32.NewProc("SetWindowPos")
 	procGetWindowText            = user32.NewProc("GetWindowTextW")
@@ -67,69 +67,20 @@ type ConfigProvider interface {
 	GetFocusDelay() time.Duration
 	GetRestoreDelay() time.Duration
 	GetKeyProcessDelay() time.Duration
-	GetThrottleDelay() time.Duration
-	GetActivityGraceDelay() time.Duration
-	GetUserInputCooldown() time.Duration
-	GetUserInputThreshold() int
+	GetInputThreshold() time.Duration
 	IsDebugEnabled() bool
 	GetActivityMode() string
 }
 
-// InputDetector interface for user input detection
-type InputDetector interface {
-	IsKeyPressed() bool
-	IsUserInputActive() bool
-}
-
-// inputDetector implementation
-type inputDetector struct {
-	logger *slog.Logger
-}
-
-// NewInputDetector creates a new input detector
-func NewInputDetector(logger *slog.Logger) InputDetector {
-	return &inputDetector{
-		logger: logger,
-	}
-}
-
-// IsKeyPressed checks if any key is currently pressed
-func (id *inputDetector) IsKeyPressed() bool {
-	// Check common modifier keys and mouse buttons
-	keys := []uintptr{
-		0x01, // VK_LBUTTON
-		0x02, // VK_RBUTTON
-		0x04, // VK_MBUTTON
-		0x10, // VK_SHIFT
-		0x11, // VK_CONTROL
-		0x12, // VK_MENU (Alt)
-		0x20, // VK_SPACE
-		0x08, // VK_BACK (Backspace)
-		0x0D, // VK_RETURN (Enter)
-		0xA0, // VK_LSHIFT
-		0xA1, // VK_RSHIFT
-		0xA2, // VK_LCONTROL
-		0xA3, // VK_RCONTROL
-		0xA4, // VK_LMENU
-		0xA5, // VK_RMENU
-	}
-
-	for _, key := range keys {
-		ret, _, _ := procGetAsyncKeyState.Call(key)
-		if ret&0x8000 != 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// IsUserInputActive checks if user is actively providing input
-func (id *inputDetector) IsUserInputActive() bool {
-	return id.IsKeyPressed()
-}
-
 // (Deprecated) Previously exported SendKeyToWindow removed as focus-based key injection
 // is now handled internally with optional global mode fallback.
+
+// windowCache stores cached window handles with metadata
+type windowCache struct {
+	handles   []win.HWND
+	timestamp time.Time
+	mutex     sync.RWMutex
+}
 
 // TeamsManager manages interactions with Teams windows
 type TeamsManager struct {
@@ -143,6 +94,8 @@ type TeamsManager struct {
 	focusFailures      map[win.HWND]focusFailInfo
 	lastEscalation     map[win.HWND]time.Time
 	escalationCooldown time.Duration
+	windowCache        *windowCache
+	cacheTTL           time.Duration
 }
 
 const (
@@ -152,6 +105,7 @@ const (
 	maxFocusFailureCountCap      = 1000
 	foregroundVerificationChecks = 3
 	escalationCooldownDefault    = 3 * time.Minute
+	windowCacheTTLDefault        = 30 * time.Second
 )
 
 type focusFailInfo struct {
@@ -337,7 +291,132 @@ func enumWindowsProc(hwnd syscall.Handle, lParam uintptr) uintptr {
 	return 1
 }
 
+// isWindowValid checks if a cached window handle is still valid and visible
+func (tm *TeamsManager) isWindowValid(hWnd win.HWND) bool {
+	if hWnd == 0 {
+		return false
+	}
+
+	// Check if window is visible
+	ret, _, _ := procIsWindowVisible.Call(uintptr(hWnd))
+	if ret == 0 {
+		return false
+	}
+
+	// Verify window still exists by checking if we can get its thread/process ID
+	var pid uint32
+	threadID, _, _ := procGetWindowThreadProcessID.Call(uintptr(hWnd), uintptr(unsafe.Pointer(&pid)))
+	if threadID == 0 || pid == 0 {
+		return false
+	}
+
+	return true
+}
+
+// validateCachedWindows filters out invalid window handles from cache
+func (tm *TeamsManager) validateCachedWindows(cached []win.HWND) []win.HWND {
+	valid := make([]win.HWND, 0, len(cached))
+	for _, hWnd := range cached {
+		if tm.isWindowValid(hWnd) {
+			valid = append(valid, hWnd)
+		} else {
+			tm.logger.Debug("Removing invalid window from cache",
+				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
+		}
+	}
+	return valid
+}
+
+// isCacheExpired checks if the window cache has exceeded its TTL
+func (tm *TeamsManager) isCacheExpired() bool {
+	if tm.windowCache == nil {
+		return true
+	}
+
+	now := time.Now()
+	if tm.now != nil {
+		now = tm.now()
+	}
+
+	ttl := tm.cacheTTL
+	if ttl == 0 {
+		ttl = windowCacheTTLDefault
+	}
+
+	tm.windowCache.mutex.RLock()
+	expired := now.Sub(tm.windowCache.timestamp) > ttl
+	tm.windowCache.mutex.RUnlock()
+
+	return expired
+}
+
+// updateWindowCache stores new window handles in the cache with current timestamp
+func (tm *TeamsManager) updateWindowCache(handles []win.HWND) {
+	if tm.windowCache == nil {
+		return
+	}
+
+	now := time.Now()
+	if tm.now != nil {
+		now = tm.now()
+	}
+
+	tm.windowCache.mutex.Lock()
+	tm.windowCache.handles = handles
+	tm.windowCache.timestamp = now
+	tm.windowCache.mutex.Unlock()
+
+	tm.logger.Debug("Updated window cache",
+		slog.Int("count", len(handles)),
+		slog.Time("timestamp", now))
+}
+
+// getCachedWindows returns cached window handles if valid, otherwise returns nil
+func (tm *TeamsManager) getCachedWindows() []win.HWND {
+	if tm.windowCache == nil {
+		return nil
+	}
+
+	// Check if cache is expired
+	if tm.isCacheExpired() {
+		tm.logger.Debug("Window cache expired")
+		return nil
+	}
+
+	tm.windowCache.mutex.RLock()
+	cached := tm.windowCache.handles
+	tm.windowCache.mutex.RUnlock()
+
+	// Validate cached handles
+	if len(cached) == 0 {
+		return nil
+	}
+
+	validated := tm.validateCachedWindows(cached)
+	if len(validated) == 0 {
+		tm.logger.Debug("No valid windows in cache after validation")
+		return nil
+	}
+
+	// Update cache with validated handles if some were removed
+	if len(validated) != len(cached) {
+		tm.updateWindowCache(validated)
+	}
+
+	tm.logger.Debug("Using cached window handles",
+		slog.Int("count", len(validated)))
+
+	return validated
+}
+
 func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
+	// Try to use cached windows first
+	if cached := tm.getCachedWindows(); cached != nil {
+		return cached
+	}
+
+	// Cache miss or expired - perform full enumeration
+	tm.logger.Debug("Cache miss - performing full window enumeration")
 	var windowList []WindowInfo
 	tm.enumContext.windows = &windowList
 
@@ -359,8 +438,16 @@ func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
 
 	// Ensure we always return a valid slice, never nil
 	if hwnds == nil {
-		return make([]win.HWND, 0)
+		hwnds = make([]win.HWND, 0)
 	}
+
+	// Update cache with newly enumerated windows
+	if len(hwnds) > 0 {
+		tm.updateWindowCache(hwnds)
+		tm.logger.Debug("Found and cached Teams windows",
+			slog.Int("count", len(hwnds)))
+	}
+
 	return hwnds
 }
 
@@ -766,24 +853,6 @@ func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 	return fmt.Errorf("failed to set focus after %d attempts", maxRetries)
 }
 
-func isKeyPressed() bool {
-	// Simplified check for just modifier keys to minimize API calls
-	modifierKeys := []uintptr{
-		0x10, // VK_SHIFT
-		0x11, // VK_CONTROL
-		0x12, // VK_MENU (Alt)
-	}
-
-	for _, key := range modifierKeys {
-		ret, _, _ := procGetAsyncKeyState.Call(key)
-		if ret&0x8000 != 0 {
-			return true
-		}
-	}
-
-	return false
-}
-
 func (tm *TeamsManager) isPIPWindow(hWnd win.HWND) bool {
 	// Add safety check for invalid window handle
 	if hWnd == 0 {
@@ -948,8 +1017,13 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 		return ctx.Err()
 	}
 
-	// Check for user input activity first - real-time keyboard detection only
-	if isKeyPressed() {
+	// Check for user input activity first - detects keyboard, mouse, and touch input
+	inputThreshold := 2000 * time.Millisecond
+	if tm.config != nil {
+		inputThreshold = tm.config.GetInputThreshold()
+	}
+	inputDetector := NewInputDetectorWithThreshold(tm.logger, inputThreshold)
+	if inputDetector.IsUserInputActive() {
 		tm.logger.Debug("User input detected, deferring Teams key send to avoid interference")
 		return ErrUserInputActive
 	}

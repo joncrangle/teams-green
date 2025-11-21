@@ -7,10 +7,12 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/joncrangle/teams-green/internal/config"
 	"github.com/joncrangle/teams-green/internal/websocket"
+	"github.com/lxn/win"
 )
 
 func TestEnumWindowsProcValidation(t *testing.T) {
@@ -158,16 +160,22 @@ func TestTeamsManagerFindTeamsWindows(t *testing.T) {
 	}
 }
 
-func TestIsKeyPressed(t *testing.T) {
+func TestGetTimeSinceLastInput(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 
 	inputDetector := NewInputDetector(logger)
-	result := inputDetector.IsKeyPressed()
+	duration := inputDetector.GetTimeSinceLastInput()
 
-	if result != true && result != false {
-		t.Errorf("IsKeyPressed() returned %v, expected boolean", result)
+	// Should return a valid duration (not negative)
+	if duration < 0 {
+		t.Errorf("GetTimeSinceLastInput() returned negative duration: %v", duration)
+	}
+
+	// Duration should be reasonable (less than 1 hour for active system)
+	if duration > time.Hour {
+		t.Logf("GetTimeSinceLastInput() returned %v (may indicate API failure or idle system)", duration)
 	}
 }
 
@@ -288,5 +296,174 @@ func TestErrUserInputActive(t *testing.T) {
 	expectedMsg := "user input active, deferring Teams activity"
 	if ErrUserInputActive.Error() != expectedMsg {
 		t.Errorf("ErrUserInputActive.Error() = %q, want %q", ErrUserInputActive.Error(), expectedMsg)
+	}
+}
+
+// TestWindowCacheExpiration tests that the cache properly expires after TTL
+func TestWindowCacheExpiration(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
+	cfg := &config.Config{}
+	tm := newTeamsManager(logger, cfg)
+
+	// Set a very short TTL for testing
+	tm.cacheTTL = 100 * time.Millisecond
+
+	// Mock time function
+	mockTime := time.Now()
+	tm.now = func() time.Time {
+		return mockTime
+	}
+
+	// Simulate cached windows
+	tm.windowCache.handles = []win.HWND{win.HWND(12345)}
+	tm.windowCache.timestamp = mockTime
+
+	// Cache should NOT be expired immediately
+	if tm.isCacheExpired() {
+		t.Error("Cache should not be expired immediately after setting")
+	}
+
+	// Advance time beyond TTL
+	mockTime = mockTime.Add(200 * time.Millisecond)
+
+	// Cache should now be expired
+	if !tm.isCacheExpired() {
+		t.Error("Cache should be expired after TTL")
+	}
+}
+
+// TestWindowCacheValidation tests that invalid windows are removed from cache
+func TestWindowCacheValidation(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
+	cfg := &config.Config{}
+	tm := newTeamsManager(logger, cfg)
+
+	// Test with invalid window handle (0)
+	invalidHandles := []win.HWND{win.HWND(0)}
+	validated := tm.validateCachedWindows(invalidHandles)
+
+	if len(validated) != 0 {
+		t.Errorf("validateCachedWindows() with invalid handle should return empty slice, got %d handles", len(validated))
+	}
+}
+
+// TestWindowCacheUpdate tests that cache is properly updated
+func TestWindowCacheUpdate(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
+	cfg := &config.Config{}
+	tm := newTeamsManager(logger, cfg)
+
+	// Mock time function
+	mockTime := time.Now()
+	tm.now = func() time.Time {
+		return mockTime
+	}
+
+	testHandles := []win.HWND{win.HWND(12345), win.HWND(67890)}
+
+	// Update cache
+	tm.updateWindowCache(testHandles)
+
+	// Verify cache was updated
+	tm.windowCache.mutex.RLock()
+	cachedHandles := tm.windowCache.handles
+	cachedTime := tm.windowCache.timestamp
+	tm.windowCache.mutex.RUnlock()
+
+	if len(cachedHandles) != len(testHandles) {
+		t.Errorf("Cache should contain %d handles, got %d", len(testHandles), len(cachedHandles))
+	}
+
+	if cachedTime != mockTime {
+		t.Errorf("Cache timestamp should be %v, got %v", mockTime, cachedTime)
+	}
+
+	for i, handle := range testHandles {
+		if cachedHandles[i] != handle {
+			t.Errorf("Cache handle[%d] should be %v, got %v", i, handle, cachedHandles[i])
+		}
+	}
+}
+
+// TestGetCachedWindowsExpired tests that expired cache returns nil
+func TestGetCachedWindowsExpired(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
+	cfg := &config.Config{}
+	tm := newTeamsManager(logger, cfg)
+
+	// Set a very short TTL
+	tm.cacheTTL = 100 * time.Millisecond
+
+	// Mock time function
+	mockTime := time.Now()
+	tm.now = func() time.Time {
+		return mockTime
+	}
+
+	// Add some handles to cache with old timestamp
+	oldTime := mockTime.Add(-200 * time.Millisecond)
+	tm.windowCache.timestamp = oldTime
+	tm.windowCache.handles = []win.HWND{win.HWND(12345)}
+
+	// getCachedWindows should return nil for expired cache
+	cached := tm.getCachedWindows()
+	if cached != nil {
+		t.Errorf("getCachedWindows() with expired cache should return nil, got %v", cached)
+	}
+}
+
+// TestFindTeamsWindowsCaching tests that FindTeamsWindows uses and updates cache
+func TestFindTeamsWindowsCaching(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
+	cfg := &config.Config{}
+	tm := newTeamsManager(logger, cfg)
+
+	// Set long TTL to ensure cache doesn't expire during test
+	tm.cacheTTL = 30 * time.Second
+
+	// First call should perform enumeration and cache results
+	firstResult := tm.FindTeamsWindows()
+
+	// Should return valid slice (not nil)
+	if firstResult == nil {
+		t.Fatal("FindTeamsWindows() should never return nil")
+	}
+
+	// Check if cache was populated (even if empty)
+	tm.windowCache.mutex.RLock()
+	cachePopulated := !tm.windowCache.timestamp.IsZero()
+	tm.windowCache.mutex.RUnlock()
+
+	if !cachePopulated {
+		t.Error("Cache timestamp should be set after FindTeamsWindows()")
+	}
+
+	// Second call within TTL should use cache (we can't easily verify without mocking EnumWindows,
+	// but we can verify it returns consistent results)
+	secondResult := tm.FindTeamsWindows()
+
+	if secondResult == nil {
+		t.Fatal("FindTeamsWindows() second call should never return nil")
+	}
+
+	// Results should be same length (cache should be used)
+	if len(firstResult) != len(secondResult) {
+		t.Logf("Note: Window count changed between calls: first=%d, second=%d (may indicate windows opened/closed)",
+			len(firstResult), len(secondResult))
 	}
 }

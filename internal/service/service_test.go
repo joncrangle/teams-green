@@ -13,6 +13,7 @@ import (
 	"github.com/joncrangle/teams-green/internal/websocket"
 )
 
+//nolint:staticcheck // SA5011: False positive - t.Fatal exits, svc cannot be nil after check
 func TestNewService(t *testing.T) {
 	cfg := &config.Config{
 		Debug:     false,

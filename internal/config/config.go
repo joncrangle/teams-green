@@ -33,6 +33,9 @@ type Config struct {
 	FocusDelayMs      int // Delay after setting focus before sending key
 	RestoreDelayMs    int // Delay after restoring minimized window
 	KeyProcessDelayMs int // Delay before restoring original focus
+
+	// Input detection configuration (milliseconds)
+	InputThresholdMs int // How recent input must be to defer Teams activity
 }
 
 // GetFocusDelay returns the focus delay as a time.Duration with fallback to default
@@ -59,24 +62,12 @@ func (cfg *Config) GetKeyProcessDelay() time.Duration {
 	return 75 * time.Millisecond // Default value
 }
 
-// GetThrottleDelay returns a reasonable throttle delay
-func (cfg *Config) GetThrottleDelay() time.Duration {
-	return 50 * time.Millisecond // Default throttle delay
-}
-
-// GetActivityGraceDelay returns grace period after user activity
-func (cfg *Config) GetActivityGraceDelay() time.Duration {
-	return 2 * time.Second // Default grace delay
-}
-
-// GetUserInputCooldown returns cooldown period for user input detection
-func (cfg *Config) GetUserInputCooldown() time.Duration {
-	return 500 * time.Millisecond // Default cooldown
-}
-
-// GetUserInputThreshold returns threshold for input detection sensitivity
-func (cfg *Config) GetUserInputThreshold() int {
-	return 3 // Default threshold
+// GetInputThreshold returns the duration threshold for considering input as "active"
+func (cfg *Config) GetInputThreshold() time.Duration {
+	if cfg.InputThresholdMs > 0 {
+		return time.Duration(cfg.InputThresholdMs) * time.Millisecond
+	}
+	return 500 * time.Millisecond // Default: consider input active if within last 500ms
 }
 
 // IsDebugEnabled returns whether debug mode is enabled
@@ -346,6 +337,9 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.KeyProcessDelayMs < 0 || cfg.KeyProcessDelayMs > 5000 {
 		errors = append(errors, "key process delay must be between 0 and 5000 milliseconds")
+	}
+	if cfg.InputThresholdMs < 0 || cfg.InputThresholdMs > 5000 {
+		errors = append(errors, "input threshold must be between 0 and 5000 milliseconds")
 	}
 
 	// Validate activity mode

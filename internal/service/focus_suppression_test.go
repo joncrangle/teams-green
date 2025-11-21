@@ -10,15 +10,12 @@ import (
 // mockConfig implements ConfigProvider with minimal methods used in tests.
 type mockConfig struct{}
 
-func (m *mockConfig) GetFocusDelay() time.Duration         { return 0 }
-func (m *mockConfig) GetRestoreDelay() time.Duration       { return 0 }
-func (m *mockConfig) GetKeyProcessDelay() time.Duration    { return 0 }
-func (m *mockConfig) GetThrottleDelay() time.Duration      { return 0 }
-func (m *mockConfig) GetActivityGraceDelay() time.Duration { return 0 }
-func (m *mockConfig) GetUserInputCooldown() time.Duration  { return 0 }
-func (m *mockConfig) GetUserInputThreshold() int           { return 0 }
-func (m *mockConfig) IsDebugEnabled() bool                 { return false }
-func (m *mockConfig) GetActivityMode() string              { return "" }
+func (m *mockConfig) GetFocusDelay() time.Duration      { return 0 }
+func (m *mockConfig) GetRestoreDelay() time.Duration    { return 0 }
+func (m *mockConfig) GetKeyProcessDelay() time.Duration { return 0 }
+func (m *mockConfig) GetInputThreshold() time.Duration  { return 500 * time.Millisecond }
+func (m *mockConfig) IsDebugEnabled() bool              { return false }
+func (m *mockConfig) GetActivityMode() string           { return "" }
 
 func newTestTeamsManager(nowFn func() time.Time) *TeamsManager {
 	return &TeamsManager{

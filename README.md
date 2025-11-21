@@ -12,6 +12,7 @@ Teams-Green runs in the background and periodically sends a key (F15) to keep yo
 - **Configurable Intervals**: Set custom activity intervals (default: 180 seconds)
 - **Advanced Timing Control**: Fine-tune focus delays and key processing timing
 - **Input Safety**: Automatic detection and deferral when user is actively typing or using the mouse
+- **Enhanced Activity Detection**: Detects all user input including keyboard, mouse clicks, mouse movement, scroll wheel, and touch input
 - **Enhanced Focus Validation**: Multiple safety checks to prevent key leakage to wrong windows
 - **WebSocket Server**: Optional real-time monitoring and control via WebSocket API
 - **Simple CLI**: Easy start/stop/status/toggle commands
@@ -141,12 +142,13 @@ The service accepts the following flags:
 | Flag                  | Short | Default | Description                                       |
 |-----------------------|-------|---------|---------------------------------------------------|
 | `--debug`             | `-d`  | `false` | Run in foreground with debug logging              |
-| `--interval`          | `-i`  | `180`   | Activity interval in seconds                      |
+| `--interval`          | `-i`  | `150`   | Activity interval in seconds (2.5 minutes)        |
 | `--websocket`         | `-w`  | `false` | Enable WebSocket server                           |
 | `--port`              | `-p`  | `8765`  | WebSocket server port                             |
 | `--focus-delay`       |       | `150`   | Delay after setting focus before sending key (ms) |
 | `--restore-delay`     |       | `100`   | Delay after restoring minimized window (ms)       |
 | `--key-process-delay` |       | `150`   | Delay before restoring original focus (ms)        |
+| `--input-threshold`   |       | `2000`  | Consider input active if within this time (ms)    |
 | `--activity-mode`     |       | `focus` | Activity mode: 'focus' (bring Teams forward) or 'global' (no focus change) |
 | `--log-format`        |       | `text`  | Log format: text or json                          |
 | `--log-file`          |       | ``      | Log file path (empty = no file logging)           |
@@ -208,8 +210,8 @@ teams-green/
 Teams-Green works by:
 
 1. **Process Detection**: Locates running Microsoft Teams processes
-2. **Smart Activity Detection**: Monitors user activity (keyboard, mouse, application focus) and intelligently resets the activity timer when user interaction is detected
-3. **Efficient Resource Usage**: Throttles Windows API calls to avoid system slowdown while maintaining responsiveness
+2. **Smart Activity Detection**: Monitors all user input (keyboard, mouse clicks, mouse movement, scroll wheel, touch) and intelligently resets the activity timer when any interaction is detected
+3. **Efficient Resource Usage**: Uses Windows GetLastInputInfo API for comprehensive input detection with minimal system impact
 4. **Window Targeting**: Finds and focuses Teams windows with enhanced focus validation
 5. **Smart Key Simulation**: Sends F15 keys with configurable timing to prevent pending notifications
 6. **Focus Protection**: Multiple validation checks prevent keys from going to wrong windows
@@ -218,9 +220,10 @@ Teams-Green works by:
 
 ### Key Safety Features
 
-- **Comprehensive Input Detection**: Automatically detects and defers Teams operations when user is actively using keyboard, mouse, or other applications
-- **Activity-Based Timer Reset**: When user activity is detected, the Teams activity interval is reset, ensuring natural user behavior takes precedence
-- **Throttled API Monitoring**: Efficiently monitors user activity with minimal system impact (maximum once per second API calls)
+- **Comprehensive Input Detection**: Automatically detects and defers Teams operations when user is actively providing any input (keyboard, mouse clicks, mouse movement, scroll wheel, touch)
+- **Activity-Based Timer Reset**: When any user input is detected, the Teams activity interval is reset, ensuring natural user behavior takes precedence
+- **Efficient Monitoring**: Single Windows API call (GetLastInputInfo) provides comprehensive input detection with minimal system impact
+- **Configurable Sensitivity**: Adjustable input threshold (default 500ms) to tune detection sensitivity
 - **Enhanced Focus Validation**: Double-checks window focus before and after key sending
 - **Configurable Timing**: Adjustable delays to work with different system performance levels
 - **Post-Send Verification**: Confirms focus state after key operations to detect interference
@@ -244,8 +247,9 @@ Teams-Green works by:
 
 ### Keys Going to Wrong Applications
 - The service includes multiple safety checks to prevent this
-- Enhanced input detection now monitors mouse activity in addition to keyboard input
-- Activity detection automatically resets the interval timer when user interaction is detected
+- Enhanced input detection now monitors all input types: keyboard, mouse (clicks AND movement), scroll wheel, and touch
+- Activity detection automatically resets the interval timer when any user input is detected
+- Input threshold can be adjusted with `--input-threshold` flag (increase for more conservative detection)
 - Run with debug logging to see protection mechanisms in action
 
 ### Performance Issues
@@ -253,10 +257,11 @@ Teams-Green works by:
 - Increase delays for slower systems: `teams-green start --focus-delay 50 --key-process-delay 200`
 
 ### Activity Detection Behavior
-- **Mouse Activity**: Clicking, dragging, or using any mouse buttons will reset the Teams activity timer
-- **Keyboard Activity**: Pressing modifier keys (Shift, Ctrl, Alt) will reset the timer
-- **Application Focus**: Actively using other applications will defer Teams activity
-- **Efficient Monitoring**: Activity is checked at most once per second to minimize system impact
+- **Mouse Activity**: Any mouse movement, clicking, dragging, or scroll wheel usage will reset the Teams activity timer
+- **Keyboard Activity**: Any key press will reset the timer
+- **Touch Input**: Touch screen interactions will reset the timer (on supported devices)
+- **Efficient Monitoring**: Uses Windows GetLastInputInfo API - single system call detects all input types with millisecond precision
+- **Configurable Threshold**: Adjust sensitivity with `--input-threshold` flag (default 500ms means any input within last 500ms is considered "active")
 - **Smart Timer Reset**: When activity is detected, the full interval timer is reset (e.g., if interval is 180s, timer resets to 180s from current time)
 
 ### WebSocket Connection Issues

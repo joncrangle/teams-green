@@ -67,6 +67,11 @@ func newTeamsManager(logger *slog.Logger, cfg *config.Config) *TeamsManager {
 		focusFailures:      make(map[win.HWND]focusFailInfo),
 		lastEscalation:     make(map[win.HWND]time.Time),
 		escalationCooldown: escalationCooldownDefault,
+		windowCache: &windowCache{
+			handles:   make([]win.HWND, 0),
+			timestamp: time.Time{}, // Zero time forces initial cache miss
+		},
+		cacheTTL: windowCacheTTLDefault,
 		enumContext: &WindowEnumContext{
 			teamsExecutables: teamsExecutables,
 			logger:           logger,
@@ -229,11 +234,12 @@ func (s *Service) handleHealthCheck(now time.Time, lastHealthCheck *time.Time) {
 }
 
 func (s *Service) handleUserActivity() bool {
-	// Create input detector for checking activity
-	inputDetector := NewInputDetector(s.logger)
+	// Create input detector with configured threshold
+	inputThreshold := s.config.GetInputThreshold()
+	inputDetector := NewInputDetectorWithThreshold(s.logger, inputThreshold)
 
-	// Check for active input without throttling to ensure accurate detection
-	if inputDetector.IsKeyPressed() || inputDetector.IsUserInputActive() {
+	// Check for active input - detects keyboard, mouse, touch
+	if inputDetector.IsUserInputActive() {
 		now := time.Now()
 		s.activityCheckMutex.Lock()
 		s.lastUserActivity = now
