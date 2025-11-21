@@ -441,11 +441,13 @@ func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
 		hwnds = make([]win.HWND, 0)
 	}
 
-	// Update cache with newly enumerated windows
+	// Update cache with newly enumerated windows (even if empty)
+	tm.updateWindowCache(hwnds)
 	if len(hwnds) > 0 {
-		tm.updateWindowCache(hwnds)
 		tm.logger.Debug("Found and cached Teams windows",
 			slog.Int("count", len(hwnds)))
+	} else {
+		tm.logger.Debug("No Teams windows found, cached empty result")
 	}
 
 	return hwnds
