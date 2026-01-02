@@ -12,7 +12,7 @@ import (
 
 const (
 	// bufferSize is the initial capacity for JSON encoding buffers
-	bufferSize = 512
+	bufferSize = 2048
 )
 
 var bufferPool = sync.Pool{
@@ -41,7 +41,7 @@ func Broadcast(e *Event, state *ServiceState) {
 
 	// Marshal the event to JSON
 	if err := encoder.Encode(e); err != nil {
-		state.Logger.Error("Failed to marshal event to JSON",
+		slog.Error("Failed to marshal event to JSON",
 			slog.String("error", err.Error()),
 			slog.String("event_type", e.Service))
 		return
@@ -49,23 +49,27 @@ func Broadcast(e *Event, state *ServiceState) {
 
 	msg := buf.String()
 
-	// Broadcast to all clients and clean up disconnected ones
-	disconnectedCount := 0
+	// Collect disconnected connections first, then clean up
+	var disconnected []*websocket.Conn
 	for conn := range state.Clients {
 		// Simple connection validation - try to send
 		if err := websocket.Message.Send(conn, msg); err != nil {
-			state.Logger.Debug("WebSocket client disconnected during broadcast, cleaning up",
+			slog.Debug("WebSocket client disconnected during broadcast, cleaning up",
 				slog.String("error", err.Error()))
-			conn.Close()
-			delete(state.Clients, conn)
-			disconnectedCount++
+			disconnected = append(disconnected, conn)
 		}
 	}
 
+	// Clean up disconnected clients after iteration
+	for _, conn := range disconnected {
+		conn.Close()
+		delete(state.Clients, conn)
+	}
+
 	// Log cleanup summary if any clients were disconnected
-	if disconnectedCount > 0 {
-		state.Logger.Debug("Cleaned up disconnected WebSocket clients",
-			slog.Int("disconnected_count", disconnectedCount),
+	if len(disconnected) > 0 {
+		slog.Debug("Cleaned up disconnected WebSocket clients",
+			slog.Int("disconnected_count", len(disconnected)),
 			slog.Int("remaining_clients", len(state.Clients)))
 	}
 }

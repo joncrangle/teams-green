@@ -178,7 +178,7 @@ func TestStopServiceNotRunning(t *testing.T) {
 		t.Error("should error when trying to stop non-running service")
 	}
 
-	if err != nil && err.Error() != "service not running (no PID file found)" {
+	if err != nil && err.Error() != "❌ service not running (no PID file found)" {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }

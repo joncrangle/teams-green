@@ -28,17 +28,21 @@ const (
 	maxBackoffSeconds   = 60
 	panicRestartDelay   = 10 * time.Second
 	shutdownSleep       = 500 * time.Millisecond
+	maxPanicRestarts    = 5             // Circuit breaker: max restarts per hour
+	panicRestartWindow  = 1 * time.Hour // Time window for panic restart tracking
 )
 
 // Service manages the teams-green application lifecycle and activity monitoring.
 type Service struct {
-	logger             *slog.Logger
 	config             *config.Config
 	state              *websocket.ServiceState
 	teamsMgr           *TeamsManager
 	lastUserActivity   time.Time
 	nextTeamsActivity  time.Time
 	activityCheckMutex sync.RWMutex
+	panicRestarts      []time.Time
+	panicMutex         sync.Mutex
+	mainLoopWG         sync.WaitGroup // Tracks main loop goroutine lifecycle
 }
 
 // updateActivityState atomically updates service scheduling timestamps and shared state following
@@ -59,29 +63,52 @@ func (s *Service) updateActivityState(activityTime time.Time) {
 	s.activityCheckMutex.Unlock()
 }
 
-func newTeamsManager(logger *slog.Logger, cfg *config.Config) *TeamsManager {
+func newTeamsManager(cfg *config.Config) *TeamsManager {
 	return &TeamsManager{
 		now:                time.Now,
-		logger:             logger,
 		config:             cfg,
 		focusFailures:      make(map[win.HWND]focusFailInfo),
 		lastEscalation:     make(map[win.HWND]time.Time),
 		escalationCooldown: escalationCooldownDefault,
-		windowCache: &windowCache{
-			handles:   make([]win.HWND, 0),
-			timestamp: time.Time{}, // Zero time forces initial cache miss
-		},
-		cacheTTL: windowCacheTTLDefault,
+		windowCache:        &windowCacheWithAtomics{},
+		cacheTTL:           windowCacheTTLDefault,
 		enumContext: &WindowEnumContext{
 			teamsExecutables: teamsExecutables,
-			logger:           logger,
-			mutex:            &sync.Mutex{},
 		},
 	}
 }
 
+// canRestartAfterPanic checks if we should restart after a panic (circuit breaker)
+func (s *Service) canRestartAfterPanic() bool {
+	s.panicMutex.Lock()
+	defer s.panicMutex.Unlock()
+
+	now := time.Now()
+	windowStart := now.Add(-panicRestartWindow)
+
+	// Filter to keep only restarts within the window
+	var validRestarts []time.Time
+	for _, t := range s.panicRestarts {
+		if t.After(windowStart) {
+			validRestarts = append(validRestarts, t)
+		}
+	}
+	s.panicRestarts = validRestarts
+
+	if len(s.panicRestarts) >= maxPanicRestarts {
+		slog.Error("Circuit breaker: too many panic restarts, giving up",
+			slog.Int("restarts", len(s.panicRestarts)),
+			slog.Duration("window", panicRestartWindow))
+		return false
+	}
+
+	s.panicRestarts = append(s.panicRestarts, now)
+	return true
+}
+
 func NewService(cfg *config.Config) *Service {
-	logger := config.InitLogger(cfg)
+	// Initialize global logger
+	config.InitLogger(cfg)
 
 	state := &websocket.ServiceState{
 		State:            "stopped",
@@ -90,19 +117,19 @@ func NewService(cfg *config.Config) *Service {
 		LastActivity:     time.Now(),
 		TeamsWindowCount: 0,
 		FailureStreak:    0,
-		Logger:           logger,
 	}
 
-	teamsMgr := newTeamsManager(logger, cfg)
+	teamsMgr := newTeamsManager(cfg)
 
 	now := time.Now()
 	return &Service{
-		logger:            logger,
 		config:            cfg,
 		state:             state,
 		teamsMgr:          teamsMgr,
 		lastUserActivity:  now,
 		nextTeamsActivity: now.Add(time.Duration(cfg.Interval) * time.Second),
+		panicRestarts:     make([]time.Time, 0, maxPanicRestarts),
+		mainLoopWG:        sync.WaitGroup{},
 	}
 }
 
@@ -121,9 +148,9 @@ func (s *Service) SetState(newState string, emit bool) {
 			Message: fmt.Sprintf("State changed to %s", currentState),
 		}, s.state)
 	}
-	s.logger.Info("Service state changed",
-		slog.String("state", currentState),
-		slog.Int("pid", currentPID))
+	slog.Info("Service state changed",
+		"state", currentState,
+		"pid", currentPID)
 }
 
 func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
@@ -139,30 +166,44 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 	// Health check tracking
 	var lastHealthCheck time.Time
 
+	// Register this goroutine in WaitGroup and ensure it's deregistered
+	s.mainLoopWG.Add(1)
+	defer s.mainLoopWG.Done()
+
 	// Panic recovery for main loop
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Error("Main loop panic recovered", slog.Any("error", r))
+			slog.Error("Main loop panic recovered", slog.Any("error", r))
 			// Don't restart if context is already done
 			if ctx.Err() != nil {
+				return
+			}
+			// Circuit breaker: limit restarts to prevent infinite loop
+			if !s.canRestartAfterPanic() {
+				slog.Error("Giving up after too many panic restarts")
 				return
 			}
 			// Attempt to restart the loop after a delay only in production
 			time.Sleep(panicRestartDelay)
 			if ctx.Err() == nil {
-				s.logger.Info("Attempting to restart main loop after panic")
-				go s.MainLoop(ctx, loopTime)
+				slog.Info("Attempting to restart main loop after panic")
+				// Register new goroutine before spawning
+				s.mainLoopWG.Add(1)
+				go func() {
+					defer s.mainLoopWG.Done()
+					s.MainLoop(ctx, loopTime)
+				}()
 			}
 		}
 	}()
 
-	s.logger.Info("Main loop started",
+	slog.Info("Main loop started",
 		slog.Duration("interval", loopTime))
 
 	for {
 		select {
 		case <-ctx.Done():
-			s.logger.Info("Main loop stopping")
+			slog.Info("Main loop stopping")
 			return
 		case <-activityTicker.C:
 			// Check context again before processing
@@ -174,7 +215,7 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 		case <-ticker.C:
 			// Check context again before processing
 			if ctx.Err() != nil {
-				s.logger.Info("Main loop stopping due to context cancellation")
+				slog.Info("Main loop stopping due to context cancellation")
 				return
 			}
 
@@ -186,9 +227,11 @@ func (s *Service) MainLoop(ctx context.Context, loopTime time.Duration) {
 			if timeUntilNext > 0 {
 				minutes := int(timeUntilNext.Minutes())
 				seconds := int(timeUntilNext.Seconds()) % 60
-				s.logger.Debug(fmt.Sprintf("Next Teams activity in %02d:%02d", minutes, seconds))
+				slog.Debug("Next Teams activity scheduled",
+					slog.Int("minutes", minutes),
+					slog.Int("seconds", seconds))
 			} else {
-				s.logger.Debug("Teams activity ready")
+				slog.Debug("Teams activity ready")
 			}
 
 			// Periodic health check
@@ -212,7 +255,7 @@ func (s *Service) safeTeamsActivity(ctx context.Context) (err error) {
 	// Panic recovery for Teams activity
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Error("Teams activity panic recovered", slog.Any("error", r))
+			slog.Error("Teams activity panic recovered", slog.Any("error", r))
 			err = fmt.Errorf("teams activity panic: %v", r)
 		}
 	}()
@@ -236,7 +279,7 @@ func (s *Service) handleHealthCheck(now time.Time, lastHealthCheck *time.Time) {
 func (s *Service) handleUserActivity() bool {
 	// Create input detector with configured threshold
 	inputThreshold := s.config.GetInputThreshold()
-	inputDetector := NewInputDetectorWithThreshold(s.logger, inputThreshold)
+	inputDetector := NewInputDetectorWithThreshold(inputThreshold)
 
 	// Check for active input - detects keyboard, mouse, touch
 	if inputDetector.IsUserInputActive() {
@@ -279,7 +322,7 @@ func (s *Service) handleTeamsActivity(ctx context.Context, teamsMissingCount *in
 			prevStreak := s.state.FailureStreak
 			windowCount := s.state.TeamsWindowCount
 			s.state.Mutex.RUnlock()
-			s.logger.Info("Teams activity resumed",
+			slog.Info("Teams activity resumed",
 				slog.Int("was_failure_streak", prevStreak),
 				slog.Int("teams_windows", windowCount))
 			if s.config.WebSocket {
@@ -300,10 +343,14 @@ func (s *Service) handleTeamsActivity(ctx context.Context, teamsMissingCount *in
 
 func (s *Service) handleFailure(ctx context.Context, err error, teamsMissingCount int) {
 	if teamsMissingCount <= maxMissingLogs {
-		s.logger.Warn("Teams activity failed",
+		s.state.Mutex.Lock()
+		failureStreak := s.state.FailureStreak
+		s.state.Mutex.Unlock()
+
+		slog.Warn("⚠️Teams activity failed",
 			slog.String("error", err.Error()),
 			slog.Int("missing_count", teamsMissingCount),
-			slog.Int("failure_streak", s.state.FailureStreak))
+			slog.Int("failure_streak", failureStreak))
 		if s.config.WebSocket {
 			websocket.Broadcast(&websocket.Event{
 				Service: "teams-green",
@@ -317,12 +364,12 @@ func (s *Service) handleFailure(ctx context.Context, err error, teamsMissingCoun
 	// Implement exponential backoff for excessive failures, but respect context
 	if s.state.FailureStreak > failureBackoffStart {
 		backoffDuration := time.Duration(min(s.state.FailureStreak*2, maxBackoffSeconds)) * time.Second
-		s.logger.Info("Applying failure backoff", slog.Duration("duration", backoffDuration))
+		slog.Info("Applying failure backoff", slog.Duration("duration", backoffDuration))
 
 		// Use context-aware sleep
 		select {
 		case <-ctx.Done():
-			s.logger.Info("Main loop stopping during backoff")
+			slog.Info("Main loop stopping during backoff")
 			return
 		case <-time.After(backoffDuration):
 			// Continue with backoff
@@ -339,18 +386,18 @@ func (s *Service) shouldSendTeamsActivity() bool {
 func (s *Service) performHealthCheck() {
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Error("Health check panic recovered", slog.Any("error", r))
+			slog.Error("Health check panic recovered", slog.Any("error", r))
 		}
 	}()
 
-	s.logger.Debug("Performing health check")
+	slog.Debug("Performing health check")
 
 	// Check memory usage (basic check)
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
 	if memStats.Alloc > memoryThreshold { // 100MB threshold
-		s.logger.Warn("High memory usage detected",
+		slog.Warn("High memory usage detected",
 			slog.Uint64("alloc_mb", memStats.Alloc/1024/1024))
 		runtime.GC() // Force garbage collection
 	}
@@ -358,7 +405,7 @@ func (s *Service) performHealthCheck() {
 	// Check goroutine count
 	goroutineCount := runtime.NumGoroutine()
 	if goroutineCount > goroutineThreshold {
-		s.logger.Warn("High goroutine count", slog.Int("count", goroutineCount))
+		slog.Warn("High goroutine count", slog.Int("count", goroutineCount))
 	}
 
 	// Check WebSocket connections if enabled
@@ -367,7 +414,7 @@ func (s *Service) performHealthCheck() {
 		clientCount := len(s.state.Clients)
 		s.state.Mutex.RUnlock()
 
-		s.logger.Debug("Health check completed",
+		slog.Debug("Health check completed",
 			slog.Uint64("memory_mb", memStats.Alloc/1024/1024),
 			slog.Int("goroutines", goroutineCount),
 			slog.Int("websocket_clients", clientCount))
@@ -375,20 +422,22 @@ func (s *Service) performHealthCheck() {
 }
 
 func (s *Service) Run() error {
-	// Setup graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
+	// Setup graceful shutdown with timeout
+	const shutdownTimeout = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
 	// Start WebSocket server if enabled
 	if s.config.WebSocket {
-		if err := websocket.StartServer(s.config.Port, s.state); err != nil {
+		server := websocket.NewServer(s.config.Port, s.state, s.config)
+		if err := server.Start(); err != nil {
 			return fmt.Errorf("failed to start WebSocket server: %w", err)
 		}
 
 		// Graceful server shutdown
 		go func() {
 			<-ctx.Done()
-			websocket.StopServer()
+			server.Stop()
 		}()
 	}
 
@@ -402,9 +451,12 @@ func (s *Service) Run() error {
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	<-sigs
 
-	s.logger.Info("Shutting down service")
+	slog.Info("Shutting down service")
 	cancel()
 	s.SetState("stopped", s.config.WebSocket)
+
+	// Wait for main loop goroutines to finish
+	s.mainLoopWG.Wait()
 
 	// Properly close log files
 	config.CloseLogFile()

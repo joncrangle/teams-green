@@ -2,9 +2,6 @@ package service
 
 import (
 	"context"
-	"log/slog"
-	"os"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -16,10 +13,6 @@ import (
 )
 
 func TestEnumWindowsProcValidation(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	tests := []struct {
 		name        string
 		hwnd        syscall.Handle
@@ -60,12 +53,9 @@ func TestEnumWindowsProcValidation(t *testing.T) {
 	}
 
 	t.Run("context with nil windows should return early", func(t *testing.T) {
-		var mutex sync.Mutex
 		ctx := &WindowEnumContext{
 			windows:          nil,
 			teamsExecutables: []string{"teams.exe"},
-			logger:           logger,
-			mutex:            &mutex,
 		}
 
 		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
@@ -76,12 +66,9 @@ func TestEnumWindowsProcValidation(t *testing.T) {
 
 	t.Run("context with nil teamsExecutables should return early", func(t *testing.T) {
 		var windows []WindowInfo
-		var mutex sync.Mutex
 		ctx := &WindowEnumContext{
 			windows:          &windows,
 			teamsExecutables: nil,
-			logger:           logger,
-			mutex:            &mutex,
 		}
 
 		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
@@ -92,12 +79,9 @@ func TestEnumWindowsProcValidation(t *testing.T) {
 
 	t.Run("context with nil logger should return early", func(t *testing.T) {
 		var windows []WindowInfo
-		var mutex sync.Mutex
 		ctx := &WindowEnumContext{
 			windows:          &windows,
 			teamsExecutables: []string{"teams.exe"},
-			logger:           nil,
-			mutex:            &mutex,
 		}
 
 		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
@@ -108,12 +92,9 @@ func TestEnumWindowsProcValidation(t *testing.T) {
 
 	t.Run("valid context should proceed", func(t *testing.T) {
 		var windows []WindowInfo
-		var mutex sync.Mutex
 		ctx := &WindowEnumContext{
 			windows:          &windows,
 			teamsExecutables: []string{"notepad.exe"},
-			logger:           logger,
-			mutex:            &mutex,
 		}
 
 		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
@@ -124,21 +105,13 @@ func TestEnumWindowsProcValidation(t *testing.T) {
 }
 
 func TestTeamsManagerFindTeamsWindows(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	var windows []WindowInfo
-	var mutex sync.Mutex
 	enumContext := &WindowEnumContext{
 		windows:          &windows,
 		teamsExecutables: teamsExecutables,
-		logger:           logger,
-		mutex:            &mutex,
 	}
 
 	tm := &TeamsManager{
-		logger:      logger,
 		enumContext: enumContext,
 	}
 
@@ -161,11 +134,7 @@ func TestTeamsManagerFindTeamsWindows(t *testing.T) {
 }
 
 func TestGetTimeSinceLastInput(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
-	inputDetector := NewInputDetector(logger)
+	inputDetector := NewInputDetector()
 	duration := inputDetector.GetTimeSinceLastInput()
 
 	// Should return a valid duration (not negative)
@@ -180,11 +149,7 @@ func TestGetTimeSinceLastInput(t *testing.T) {
 }
 
 func TestTeamsManagerIsUserInputActive(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
-	inputDetector := NewInputDetector(logger)
+	inputDetector := NewInputDetector()
 
 	result := inputDetector.IsUserInputActive()
 
@@ -196,22 +161,15 @@ func TestTeamsManagerIsUserInputActive(t *testing.T) {
 // TestActivityModeGlobal ensures global mode path returns quickly
 func TestActivityModeGlobal(t *testing.T) {
 	t.Helper()
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	cfg := &config.Config{ActivityMode: "global"}
-	tm := newTeamsManager(logger, cfg)
+	tm := newTeamsManager(cfg)
 	ctx := context.Background()
 	state := &websocket.ServiceState{}
 	_ = tm.SendKeysToTeams(ctx, state) // We don't assert success due to environment constraints
 }
 
 func TestTeamsManagerHandleTeamsNotFound(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
-	tm := &TeamsManager{
-		logger: logger,
-	}
+	tm := &TeamsManager{}
 
 	state := &websocket.ServiceState{}
 
@@ -221,17 +179,13 @@ func TestTeamsManagerHandleTeamsNotFound(t *testing.T) {
 		t.Error("handleTeamsNotFound() should return an error")
 	}
 
-	expectedErrorMsg := "no Teams windows found"
+	expectedErrorMsg := "❌ no Teams windows found"
 	if err.Error() != expectedErrorMsg {
 		t.Errorf("handleTeamsNotFound() error = %v, want %v", err.Error(), expectedErrorMsg)
 	}
 }
 
 func TestTeamsManagerSendKeysToTeams(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	cfg := &config.Config{
 		Debug:             false,
 		Interval:          180,
@@ -242,7 +196,7 @@ func TestTeamsManagerSendKeysToTeams(t *testing.T) {
 		KeyProcessDelayMs: 10,
 	}
 
-	tm := newTeamsManager(logger, cfg)
+	tm := newTeamsManager(cfg)
 
 	ctx := context.Background()
 	state := &websocket.ServiceState{}
@@ -257,10 +211,6 @@ func TestTeamsManagerSendKeysToTeams(t *testing.T) {
 }
 
 func TestTeamsManagerSendKeysToTeamsCancelled(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	cfg := &config.Config{
 		Debug:             false,
 		Interval:          180,
@@ -272,7 +222,6 @@ func TestTeamsManagerSendKeysToTeamsCancelled(t *testing.T) {
 	}
 
 	tm := &TeamsManager{
-		logger: logger,
 		config: cfg,
 	}
 
@@ -301,12 +250,8 @@ func TestErrUserInputActive(t *testing.T) {
 
 // TestWindowCacheExpiration tests that the cache properly expires after TTL
 func TestWindowCacheExpiration(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	cfg := &config.Config{}
-	tm := newTeamsManager(logger, cfg)
+	tm := newTeamsManager(cfg)
 
 	// Set a very short TTL for testing
 	tm.cacheTTL = 100 * time.Millisecond
@@ -318,8 +263,10 @@ func TestWindowCacheExpiration(t *testing.T) {
 	}
 
 	// Simulate cached windows
-	tm.windowCache.handles = []win.HWND{win.HWND(12345)}
-	tm.windowCache.timestamp = mockTime
+	tm.windowCache.snapshot.Store(&windowCacheSnapshot{
+		handles:   []win.HWND{win.HWND(12345)},
+		timestamp: mockTime,
+	})
 
 	// Cache should NOT be expired immediately
 	if tm.isCacheExpired() {
@@ -337,12 +284,8 @@ func TestWindowCacheExpiration(t *testing.T) {
 
 // TestWindowCacheValidation tests that invalid windows are removed from cache
 func TestWindowCacheValidation(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	cfg := &config.Config{}
-	tm := newTeamsManager(logger, cfg)
+	tm := newTeamsManager(cfg)
 
 	// Test with invalid window handle (0)
 	invalidHandles := []win.HWND{win.HWND(0)}
@@ -355,12 +298,8 @@ func TestWindowCacheValidation(t *testing.T) {
 
 // TestWindowCacheUpdate tests that cache is properly updated
 func TestWindowCacheUpdate(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	cfg := &config.Config{}
-	tm := newTeamsManager(logger, cfg)
+	tm := newTeamsManager(cfg)
 
 	// Mock time function
 	mockTime := time.Now()
@@ -374,10 +313,12 @@ func TestWindowCacheUpdate(t *testing.T) {
 	tm.updateWindowCache(testHandles)
 
 	// Verify cache was updated
-	tm.windowCache.mutex.RLock()
-	cachedHandles := tm.windowCache.handles
-	cachedTime := tm.windowCache.timestamp
-	tm.windowCache.mutex.RUnlock()
+	snap := tm.windowCache.snapshot.Load()
+	if snap == nil {
+		t.Fatal("Cache snapshot should not be nil")
+	}
+	cachedHandles := snap.handles
+	cachedTime := snap.timestamp
 
 	if len(cachedHandles) != len(testHandles) {
 		t.Errorf("Cache should contain %d handles, got %d", len(testHandles), len(cachedHandles))
@@ -396,12 +337,8 @@ func TestWindowCacheUpdate(t *testing.T) {
 
 // TestGetCachedWindowsExpired tests that expired cache returns nil
 func TestGetCachedWindowsExpired(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	cfg := &config.Config{}
-	tm := newTeamsManager(logger, cfg)
+	tm := newTeamsManager(cfg)
 
 	// Set a very short TTL
 	tm.cacheTTL = 100 * time.Millisecond
@@ -414,8 +351,10 @@ func TestGetCachedWindowsExpired(t *testing.T) {
 
 	// Add some handles to cache with old timestamp
 	oldTime := mockTime.Add(-200 * time.Millisecond)
-	tm.windowCache.timestamp = oldTime
-	tm.windowCache.handles = []win.HWND{win.HWND(12345)}
+	tm.windowCache.snapshot.Store(&windowCacheSnapshot{
+		handles:   []win.HWND{win.HWND(12345)},
+		timestamp: oldTime,
+	})
 
 	// getCachedWindows should return nil for expired cache
 	cached := tm.getCachedWindows()
@@ -426,12 +365,8 @@ func TestGetCachedWindowsExpired(t *testing.T) {
 
 // TestFindTeamsWindowsCaching tests that FindTeamsWindows uses and updates cache
 func TestFindTeamsWindowsCaching(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	cfg := &config.Config{}
-	tm := newTeamsManager(logger, cfg)
+	tm := newTeamsManager(cfg)
 
 	// Set long TTL to ensure cache doesn't expire during test
 	tm.cacheTTL = 30 * time.Second
@@ -445,9 +380,8 @@ func TestFindTeamsWindowsCaching(t *testing.T) {
 	}
 
 	// Check if cache was populated (even if empty)
-	tm.windowCache.mutex.RLock()
-	cachePopulated := !tm.windowCache.timestamp.IsZero()
-	tm.windowCache.mutex.RUnlock()
+	snap := tm.windowCache.snapshot.Load()
+	cachePopulated := snap != nil && !snap.timestamp.IsZero()
 
 	if !cachePopulated {
 		t.Error("Cache timestamp should be set after FindTeamsWindows()")

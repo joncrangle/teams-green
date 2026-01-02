@@ -168,7 +168,7 @@ func TestConfigInitialization(t *testing.T) {
 
 	// Add flags similar to start command
 	testCmd.Flags().BoolVarP(&cfg.Debug, "debug", "d", false, "Run in foreground with debug logging")
-	testCmd.Flags().IntVarP(&cfg.Interval, "interval", "i", 180, "Loop interval in seconds")
+	testCmd.Flags().IntVarP(&cfg.Interval, "interval", "i", 150, "Loop interval in seconds")
 	testCmd.Flags().BoolVarP(&cfg.WebSocket, "websocket", "w", false, "Enable WebSocket server")
 	testCmd.Flags().IntVarP(&cfg.Port, "port", "p", 8765, "WebSocket server port")
 
@@ -178,8 +178,8 @@ func TestConfigInitialization(t *testing.T) {
 	}
 
 	// Check default values through flag defaults
-	if flag := testCmd.Flags().Lookup("interval"); flag != nil && flag.DefValue != "180" {
-		t.Errorf("default interval should be 180, got %s", flag.DefValue)
+	if flag := testCmd.Flags().Lookup("interval"); flag != nil && flag.DefValue != "150" {
+		t.Errorf("default interval should be 150, got %s", flag.DefValue)
 	}
 
 	if flag := testCmd.Flags().Lookup("port"); flag != nil && flag.DefValue != "8765" {

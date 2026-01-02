@@ -2,9 +2,7 @@ package websocket
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -43,16 +41,11 @@ func TestServiceState(t *testing.T) {
 }
 
 func TestServiceStateConcurrentAccess(_ *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	state := &ServiceState{
 		State:            "running",
 		PID:              12345,
 		Clients:          make(map[*websocket.Conn]bool),
 		Mutex:            sync.RWMutex{},
-		Logger:           logger,
 		LastActivity:     time.Now(),
 		TeamsWindowCount: 2,
 		FailureStreak:    0,
@@ -153,16 +146,11 @@ func TestEventTimestamp(t *testing.T) {
 }
 
 func TestBroadcast(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	state := &ServiceState{
 		State:            "running",
 		PID:              12345,
 		Clients:          make(map[*websocket.Conn]bool),
 		Mutex:            sync.RWMutex{},
-		Logger:           logger,
 		LastActivity:     time.Now(),
 		TeamsWindowCount: 2,
 		FailureStreak:    0,
@@ -185,16 +173,11 @@ func TestBroadcast(t *testing.T) {
 }
 
 func TestBroadcastWithClients(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	state := &ServiceState{
 		State:            "running",
 		PID:              12345,
 		Clients:          make(map[*websocket.Conn]bool),
 		Mutex:            sync.RWMutex{},
-		Logger:           logger,
 		LastActivity:     time.Now(),
 		TeamsWindowCount: 2,
 		FailureStreak:    0,
@@ -220,19 +203,16 @@ func TestBroadcastWithClients(t *testing.T) {
 }
 
 func TestWebSocketServerStartStop(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	state := &ServiceState{
 		State:            "running",
 		PID:              12345,
 		Clients:          make(map[*websocket.Conn]bool),
-		Logger:           logger,
 		LastActivity:     time.Now(),
 		TeamsWindowCount: 2,
 		FailureStreak:    0,
 	}
+
+	cfg := &defaultConfigProvider{}
 
 	// Find an available port
 	listener, err := net.Listen("tcp", ":0")
@@ -242,32 +222,30 @@ func TestWebSocketServerStartStop(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close()
 
-	err = StartServer(port, state)
+	server := NewServer(port, state, cfg)
+	err = server.Start()
 	if err != nil {
 		t.Errorf("failed to start WebSocket server: %v", err)
 	}
 
 	time.Sleep(100 * time.Millisecond)
 
-	StopServer()
+	server.Stop()
 
 	t.Log("WebSocket server start/stop cycle completed")
 }
 
 func TestWebSocketServerPortInUse(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	state := &ServiceState{
 		State:            "running",
 		PID:              12345,
 		Clients:          make(map[*websocket.Conn]bool),
-		Logger:           logger,
 		LastActivity:     time.Now(),
 		TeamsWindowCount: 2,
 		FailureStreak:    0,
 	}
+
+	cfg := &defaultConfigProvider{}
 
 	// Start a TCP server to occupy a port first
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -287,29 +265,27 @@ func TestWebSocketServerPortInUse(t *testing.T) {
 	}()
 
 	// Try to start websocket server on the same port - should fail
-	err = StartServer(port, state)
+	server := NewServer(port, state, cfg)
+	err = server.Start()
 	if err == nil {
 		t.Error("should fail to start server on occupied port")
-		StopServer()
+		server.Stop()
 	} else {
 		t.Logf("correctly failed to start server on occupied port: %v", err)
 	}
 }
 
 func TestMultipleServerStartStop(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	state := &ServiceState{
 		State:            "running",
 		PID:              12345,
 		Clients:          make(map[*websocket.Conn]bool),
-		Logger:           logger,
 		LastActivity:     time.Now(),
 		TeamsWindowCount: 2,
 		FailureStreak:    0,
 	}
+
+	cfg := &defaultConfigProvider{}
 
 	// Find an available port
 	listener, err := net.Listen("tcp", ":0")
@@ -320,7 +296,8 @@ func TestMultipleServerStartStop(t *testing.T) {
 	listener.Close()
 
 	// Start first server
-	err = StartServer(port, state)
+	server1 := NewServer(port, state, cfg)
+	err = server1.Start()
 	if err != nil {
 		t.Fatalf("failed to start first WebSocket server: %v", err)
 	}
@@ -328,26 +305,28 @@ func TestMultipleServerStartStop(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Try to start another server on the same port (should fail due to port binding)
-	err = StartServer(port, state)
+	server2 := NewServer(port, state, cfg)
+	err = server2.Start()
 	if err == nil {
 		t.Error("should not be able to start server on already bound port")
-		StopServer()
+		server2.Stop()
 	} else {
 		t.Logf("correctly prevented server start on bound port: %v", err)
 	}
 
 	// Stop the first server
-	StopServer()
+	server1.Stop()
 	time.Sleep(50 * time.Millisecond)
 
 	// Should be able to start again after stopping
-	err = StartServer(port, state)
+	server3 := NewServer(port, state, cfg)
+	err = server3.Start()
 	if err != nil {
 		t.Errorf("should be able to restart server after stopping: %v", err)
 	}
 
 	time.Sleep(50 * time.Millisecond)
-	StopServer()
+	server3.Stop()
 }
 
 func TestWebSocketHandler(t *testing.T) {
@@ -370,16 +349,11 @@ func TestWebSocketHandler(t *testing.T) {
 
 func TestBroadcastBufferPool(t *testing.T) {
 	// Test that the buffer pool is working correctly
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	state := &ServiceState{
 		State:            "running",
 		PID:              12345,
 		Clients:          make(map[*websocket.Conn]bool),
 		Mutex:            sync.RWMutex{},
-		Logger:           logger,
 		LastActivity:     time.Now(),
 		TeamsWindowCount: 2,
 		FailureStreak:    0,

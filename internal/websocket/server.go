@@ -16,11 +16,6 @@ import (
 )
 
 const (
-	// Server timeouts
-	serverReadTimeout  = 60 * time.Second
-	serverWriteTimeout = 60 * time.Second
-	serverIdleTimeout  = 300 * time.Second // 5 minutes
-
 	// Startup timeout
 	serverStartTimeout = 100 * time.Millisecond
 )
@@ -32,83 +27,133 @@ type ServiceState struct {
 	PID              int                      // Process ID of the service
 	Clients          map[*websocket.Conn]bool // Active WebSocket client connections
 	Mutex            sync.RWMutex             // Protects concurrent access to state
-	Logger           *slog.Logger             // Logger for service events
 	LastActivity     time.Time                // Timestamp of last Teams activity
 	TeamsWindowCount int                      // Number of detected Teams windows
 	FailureStreak    int                      // Current failure streak count
 }
 
-var (
-	listener      net.Listener
-	serverMux     sync.Mutex
-	serverRunning int32
-	serverCancel  context.CancelFunc
-	serverDone    chan struct{} // Channel to signal server goroutine completion
-)
+// Server manages the WebSocket server lifecycle and resources.
+type Server struct {
+	listener net.Listener
+	mux      sync.Mutex
+	running  int32
+	cancel   context.CancelFunc
+	done     chan struct{}
+	port     int
+	state    *ServiceState
+	config   ConfigProvider
+}
 
-// StartServer starts a WebSocket server on the specified port with security restrictions.
-// It only accepts connections from localhost and validates origins for security.
-// The server runs in a separate goroutine and can be stopped with StopServer().
-func StartServer(port int, state *ServiceState) error {
-	serverMux.Lock()
-	defer serverMux.Unlock()
+// ConfigProvider defines the interface for accessing configuration values
+// needed by the WebSocket server and related components.
+type ConfigProvider interface {
+	GetFocusDelay() time.Duration
+	GetRestoreDelay() time.Duration
+	GetKeyProcessDelay() time.Duration
+	GetInputThreshold() time.Duration
+	IsDebugEnabled() bool
+	GetActivityMode() string
+	GetWebSocketReadTimeout() time.Duration
+	GetWebSocketWriteTimeout() time.Duration
+	GetWebSocketIdleTimeout() time.Duration
+}
+
+// NewServer creates a new WebSocket server instance.
+func NewServer(port int, state *ServiceState, config ConfigProvider) *Server {
+	return &Server{
+		port:   port,
+		state:  state,
+		config: config,
+		done:   make(chan struct{}),
+	}
+}
+
+// Start starts the WebSocket server on the configured port.
+func (s *Server) Start() error {
+	s.mux.Lock()
+	defer s.mux.Unlock()
 
 	// Check if server is already running
-	if err := checkServerRunning(); err != nil {
+	if err := s.checkServerRunning(); err != nil {
 		return err
 	}
 
 	// Create and bind listener
-	listener, err := createListener(port)
+	listener, err := s.createListener()
 	if err != nil {
 		return err
 	}
+	s.listener = listener
 
 	// Set up context for cancellation
 	ctx, cancel := context.WithCancel(context.Background())
-	serverCancel = cancel
+	s.cancel = cancel
 
 	// Start server in background goroutine
-	return startServerGoroutine(ctx, cancel, listener, port, state)
+	return s.startServerGoroutine(ctx, cancel)
+}
+
+// Stop gracefully stops the WebSocket server and closes all connections.
+// It is safe to call multiple times and will not panic if the server is not running.
+func (s *Server) Stop() {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+
+	if atomic.LoadInt32(&s.running) == 1 {
+		atomic.StoreInt32(&s.running, 0)
+		if s.cancel != nil {
+			s.cancel()
+		}
+		// Close listener if it exists
+		if s.listener != nil {
+			s.listener.Close()
+			s.listener = nil
+		}
+
+		// Wait for server goroutine to complete
+		if s.done != nil {
+			<-s.done
+			s.done = nil
+		}
+	}
 }
 
 // checkServerRunning verifies that the server is not already running.
-func checkServerRunning() error {
-	if atomic.LoadInt32(&serverRunning) == 1 {
-		return fmt.Errorf("websocket server is already running")
+func (s *Server) checkServerRunning() error {
+	if atomic.LoadInt32(&s.running) == 1 {
+		return fmt.Errorf("❌ websocket server is already running")
 	}
 	return nil
 }
 
-// createListener creates and returns a TCP listener on the specified port.
-func createListener(port int) (net.Listener, error) {
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+// createListener creates and returns a TCP listener on the configured port.
+func (s *Server) createListener() (net.Listener, error) {
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
 	if err != nil {
-		return nil, fmt.Errorf("failed to bind to port %d: %w", port, err)
+		return nil, fmt.Errorf("❌ failed to bind to port %d: %w", s.port, err)
 	}
 	return listener, nil
 }
 
 // startServerGoroutine starts the WebSocket server in a background goroutine.
-func startServerGoroutine(ctx context.Context, cancel context.CancelFunc, listener net.Listener, port int, state *ServiceState) error {
+func (s *Server) startServerGoroutine(ctx context.Context, cancel context.CancelFunc) error {
 	serverReady := make(chan error, 1)
-	serverDone = make(chan struct{}) // Initialize done channel
 
 	go func() {
 		defer close(serverReady)
-		defer cleanupServerResources()
-		defer close(serverDone) // Signal completion
+		defer s.cleanupServerResources()
+		defer close(s.done) // Signal completion
 
-		atomic.StoreInt32(&serverRunning, 1)
+		atomic.StoreInt32(&s.running, 1)
 
-		state.Logger.Info("WebSocket server starting",
-			slog.String("address", fmt.Sprintf("ws://127.0.0.1:%d", port)))
+		slog.Info("🚀 WebSocket server starting",
+			slog.String("address", fmt.Sprintf("ws://127.0.0.1:%d", s.port)))
 
 		// Create WebSocket handler with connection validation
-		wsHandler := createWebSocketHandler(state)
+		wsHandler := s.createWebSocketHandler()
 
 		// Create HTTP server with timeouts
-		server := createHTTPServer(wsHandler)
+		server := s.createHTTPServer(wsHandler)
 
 		// Signal that server is ready
 		serverReady <- nil
@@ -121,9 +166,9 @@ func startServerGoroutine(ctx context.Context, cancel context.CancelFunc, listen
 		}()
 
 		// Serve requests until context is cancelled or error occurs
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(s.listener); err != nil && err != http.ErrServerClosed {
 			if ctx.Err() == nil {
-				state.Logger.Error("WebSocket server error", slog.String("error", err.Error()))
+				slog.Error("❌ WebSocket server error", slog.String("error", err.Error()))
 			}
 		}
 	}()
@@ -132,9 +177,11 @@ func startServerGoroutine(ctx context.Context, cancel context.CancelFunc, listen
 	select {
 	case err := <-serverReady:
 		if err != nil {
-			listener.Close()
+			if s.listener != nil {
+				s.listener.Close()
+			}
 			cancel()
-			return fmt.Errorf("server failed to start: %w", err)
+			return fmt.Errorf("❌ server failed to start: %w", err)
 		}
 	case <-time.After(serverStartTimeout):
 		// Server started successfully within timeout
@@ -144,40 +191,36 @@ func startServerGoroutine(ctx context.Context, cancel context.CancelFunc, listen
 }
 
 // cleanupServerResources cleans up server resources when the goroutine exits.
-// This function is called from the server goroutine's defer and should not
-// conflict with StopServer() which also cleans up resources.
-func cleanupServerResources() {
-	atomic.StoreInt32(&serverRunning, 0)
-	// Note: listener is closed by StopServer() to avoid double-close
+func (s *Server) cleanupServerResources() {
+	atomic.StoreInt32(&s.running, 0)
 }
 
 // createWebSocketHandler creates a WebSocket handler with connection validation.
-func createWebSocketHandler(state *ServiceState) websocket.Handler {
+func (s *Server) createWebSocketHandler() websocket.Handler {
 	return websocket.Handler(func(ws *websocket.Conn) {
-		if err := validateConnection(ws); err != nil {
-			state.Logger.Warn("Connection validation failed",
+		if err := s.validateConnection(ws); err != nil {
+			slog.Warn("Connection validation failed",
 				slog.String("reason", err.Error()),
 				slog.String("remote_addr", ws.Request().RemoteAddr))
 			ws.Close()
 			return
 		}
-		HandleConnection(ws, state)
+		HandleConnection(ws, s.state, s.config)
 	})
 }
 
 // createHTTPServer creates an HTTP server with appropriate timeouts.
-func createHTTPServer(handler websocket.Handler) *http.Server {
+func (s *Server) createHTTPServer(handler websocket.Handler) *http.Server {
 	return &http.Server{
 		Handler:      handler,
-		ReadTimeout:  serverReadTimeout,
-		WriteTimeout: serverWriteTimeout,
-		IdleTimeout:  serverIdleTimeout,
+		ReadTimeout:  s.config.GetWebSocketReadTimeout(),
+		WriteTimeout: s.config.GetWebSocketWriteTimeout(),
+		IdleTimeout:  s.config.GetWebSocketIdleTimeout(),
 	}
 }
 
 // validateConnection performs security validation on incoming WebSocket connections.
-// It checks origin headers and ensures connections are from localhost only.
-func validateConnection(ws *websocket.Conn) error {
+func (s *Server) validateConnection(ws *websocket.Conn) error {
 	if ws.Request() != nil {
 		origin := ws.Request().Header.Get("Origin")
 		if origin != "" && !isValidOrigin(origin) {
@@ -221,27 +264,41 @@ func isValidOrigin(origin string) bool {
 		strings.HasPrefix(origin, "https://127.0.0.1:")
 }
 
-// StopServer gracefully stops the WebSocket server and closes all connections.
-// It is safe to call multiple times and will not panic if the server is not running.
-func StopServer() {
-	serverMux.Lock()
-	defer serverMux.Unlock()
+// defaultConfigProvider provides default values for WebSocket timeouts
+type defaultConfigProvider struct{}
 
-	if atomic.LoadInt32(&serverRunning) == 1 {
-		atomic.StoreInt32(&serverRunning, 0)
-		if serverCancel != nil {
-			serverCancel()
-		}
-		// Close listener if it exists
-		if listener != nil {
-			listener.Close()
-			listener = nil // Clear the global reference
-		}
+func (d *defaultConfigProvider) GetFocusDelay() time.Duration {
+	return 10 * time.Millisecond
+}
 
-		// Wait for server goroutine to complete
-		if serverDone != nil {
-			<-serverDone
-			serverDone = nil
-		}
-	}
+func (d *defaultConfigProvider) GetRestoreDelay() time.Duration {
+	return 10 * time.Millisecond
+}
+
+func (d *defaultConfigProvider) GetKeyProcessDelay() time.Duration {
+	return 75 * time.Millisecond
+}
+
+func (d *defaultConfigProvider) GetInputThreshold() time.Duration {
+	return 500 * time.Millisecond
+}
+
+func (d *defaultConfigProvider) IsDebugEnabled() bool {
+	return false
+}
+
+func (d *defaultConfigProvider) GetActivityMode() string {
+	return "focus"
+}
+
+func (d *defaultConfigProvider) GetWebSocketReadTimeout() time.Duration {
+	return 60 * time.Second
+}
+
+func (d *defaultConfigProvider) GetWebSocketWriteTimeout() time.Duration {
+	return 60 * time.Second
+}
+
+func (d *defaultConfigProvider) GetWebSocketIdleTimeout() time.Duration {
+	return 300 * time.Second
 }

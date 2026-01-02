@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"slices"
@@ -135,19 +136,19 @@ func startInBackground(exe string, args []string) error {
 		if killErr := cmd.Process.Kill(); killErr != nil {
 			time.Sleep(100 * time.Millisecond)
 			if waitErr := cmd.Wait(); waitErr != nil {
-				return fmt.Errorf("service started but failed to write PID file (%w), failed to cleanup process (%v), and failed to wait for process (%v)", err, killErr, waitErr)
+				return fmt.Errorf("❌ service started but failed to write PID file (%w), failed to cleanup process (%w), and failed to wait for process (%w)", err, killErr, waitErr)
 			}
-			return fmt.Errorf("service started but failed to write PID file (%w) and failed to kill process (%v)", err, killErr)
+			return fmt.Errorf("❌ service started but failed to write PID file (%w) and failed to kill process (%w)", err, killErr)
 		}
 
 		if waitErr := cmd.Wait(); waitErr != nil {
-			return fmt.Errorf("service started but failed to write PID file (%w), killed process but failed to wait (%v)", err, waitErr)
+			return fmt.Errorf("❌ service started but failed to write PID file (%w), killed process but failed to wait (%w)", err, waitErr)
 		}
 
-		return fmt.Errorf("service started but failed to write PID file: %w", err)
+		return fmt.Errorf("❌ service started but failed to write PID file: %w", err)
 	}
 
-	fmt.Printf("Service started in background (PID %d)\n", cmd.Process.Pid)
+	slog.Info("Service started in background", "pid", cmd.Process.Pid)
 	return nil
 }
 
@@ -161,17 +162,17 @@ func writePidFile(pid int) error {
 	f, err := os.OpenFile(config.PidFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, pidFilePermissions)
 	if err != nil {
 		if os.IsExist(err) {
-			return fmt.Errorf("pid file already exists: %w", err)
+			return fmt.Errorf("❌ pid file already exists: %w", err)
 		}
-		return fmt.Errorf("failed to create pid file: %w", err)
+		return fmt.Errorf("❌ failed to create pid file: %w", err)
 	}
 	defer f.Close()
 	if _, err := f.WriteString(pidContent); err != nil {
-		return fmt.Errorf("failed to write pid file: %w", err)
+		return fmt.Errorf("❌ failed to write pid file: %w", err)
 	}
 	// Ensure contents are flushed.
 	if err := f.Sync(); err != nil {
-		return fmt.Errorf("failed to sync pid file: %w", err)
+		return fmt.Errorf("❌ failed to sync pid file: %w", err)
 	}
 	return nil
 }
@@ -181,9 +182,9 @@ func Stop() error {
 	pidBytes, err := os.ReadFile(config.PidFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("service not running (no PID file found)")
+			return fmt.Errorf("❌ service not running (no PID file found)")
 		}
-		return fmt.Errorf("failed to read PID file: %w", err)
+		return fmt.Errorf("❌ failed to read PID file: %w", err)
 	}
 
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
@@ -201,20 +202,20 @@ func Stop() error {
 	}
 
 	if err := proc.Kill(); err != nil {
-		return fmt.Errorf("failed to stop process (PID %d): %w", pid, err)
+		return fmt.Errorf("❌ failed to stop process (PID %d): %w", pid, err)
 	}
 
 	if err := os.Remove(config.PidFile); err != nil {
-		fmt.Printf("Service stopped (PID %d) but failed to cleanup PID file: %v\n", pid, err)
+		slog.Warn("Service stopped but failed to cleanup PID file", "pid", pid, "error", err)
 	} else {
-		fmt.Printf("Service stopped (PID %d)\n", pid)
+		slog.Info("Service stopped", "pid", pid)
 	}
 	return nil
 }
 
 func cleanupPidFileWithError(err error) error {
 	if removeErr := os.Remove(config.PidFile); removeErr != nil {
-		return fmt.Errorf("%v (cleanup failed: %v)", err, removeErr)
+		return fmt.Errorf("❌ %w (cleanup failed: %w)", err, removeErr)
 	}
 	return err
 }
@@ -232,9 +233,9 @@ func GetEnhancedStatus() (bool, int, *StatusInfo, error) {
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 	if err != nil {
 		if removeErr := os.Remove(config.PidFile); removeErr != nil {
-			return false, 0, nil, fmt.Errorf("invalid PID file (%v) and failed to cleanup (%v)", err, removeErr)
+			return false, 0, nil, fmt.Errorf("invalid PID file (%w) and failed to cleanup (%w)", err, removeErr)
 		}
-		return false, 0, nil, fmt.Errorf("invalid PID file (cleaned up): %v", err)
+		return false, 0, nil, fmt.Errorf("invalid PID file (cleaned up): %w", err)
 	}
 
 	if IsProcessRunning(pid) {

@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"log/slog"
 	"net"
 	"os"
 	"slices"
@@ -25,10 +24,6 @@ func TestNewService(t *testing.T) {
 	svc := NewService(cfg)
 	if svc == nil {
 		t.Fatal("expected service but got nil")
-	}
-
-	if svc.logger == nil {
-		t.Error("service logger should not be nil")
 	}
 
 	if svc.config == nil {
@@ -95,11 +90,12 @@ func TestServiceSetStateWithWebSocket(t *testing.T) {
 	svc := NewService(cfg)
 
 	// Start websocket server for testing
-	err = websocket.StartServer(cfg.Port, svc.state)
+	server := websocket.NewServer(cfg.Port, svc.state, cfg)
+	err = server.Start()
 	if err != nil {
 		t.Fatalf("failed to start websocket server: %v", err)
 	}
-	defer websocket.StopServer()
+	defer server.Stop()
 
 	// Test setting state with emitting
 	svc.SetState("running", true)
@@ -146,17 +142,8 @@ func TestTeamsManager(t *testing.T) {
 		LogFormat: "text",
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	tm := &TeamsManager{
-		logger: logger,
 		config: cfg,
-	}
-
-	if tm.logger == nil {
-		t.Error("logger should not be nil")
 	}
 
 	if tm.config == nil {

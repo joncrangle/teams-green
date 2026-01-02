@@ -36,6 +36,11 @@ type Config struct {
 
 	// Input detection configuration (milliseconds)
 	InputThresholdMs int // How recent input must be to defer Teams activity
+
+	// WebSocket timeout configuration (seconds)
+	WebSocketReadTimeout  int // Read timeout (default: 60)
+	WebSocketWriteTimeout int // Write timeout (default: 60)
+	WebSocketIdleTimeout  int // Idle timeout (default: 300)
 }
 
 // GetFocusDelay returns the focus delay as a time.Duration with fallback to default
@@ -43,7 +48,7 @@ func (cfg *Config) GetFocusDelay() time.Duration {
 	if cfg.FocusDelayMs > 0 {
 		return time.Duration(cfg.FocusDelayMs) * time.Millisecond
 	}
-	return 10 * time.Millisecond // Default value
+	return 150 * time.Millisecond
 }
 
 // GetRestoreDelay returns the restore delay as a time.Duration with fallback to default
@@ -51,7 +56,7 @@ func (cfg *Config) GetRestoreDelay() time.Duration {
 	if cfg.RestoreDelayMs > 0 {
 		return time.Duration(cfg.RestoreDelayMs) * time.Millisecond
 	}
-	return 10 * time.Millisecond // Default value
+	return 100 * time.Millisecond
 }
 
 // GetKeyProcessDelay returns the key process delay as a time.Duration with fallback to default
@@ -59,7 +64,7 @@ func (cfg *Config) GetKeyProcessDelay() time.Duration {
 	if cfg.KeyProcessDelayMs > 0 {
 		return time.Duration(cfg.KeyProcessDelayMs) * time.Millisecond
 	}
-	return 75 * time.Millisecond // Default value
+	return 150 * time.Millisecond
 }
 
 // GetInputThreshold returns the duration threshold for considering input as "active"
@@ -67,7 +72,31 @@ func (cfg *Config) GetInputThreshold() time.Duration {
 	if cfg.InputThresholdMs > 0 {
 		return time.Duration(cfg.InputThresholdMs) * time.Millisecond
 	}
-	return 500 * time.Millisecond // Default: consider input active if within last 500ms
+	return 500 * time.Millisecond
+}
+
+// GetWebSocketReadTimeout returns the read timeout in seconds with fallback to default
+func (cfg *Config) GetWebSocketReadTimeout() time.Duration {
+	if cfg.WebSocketReadTimeout > 0 {
+		return time.Duration(cfg.WebSocketReadTimeout) * time.Second
+	}
+	return 60 * time.Second
+}
+
+// GetWebSocketWriteTimeout returns the write timeout in seconds with fallback to default
+func (cfg *Config) GetWebSocketWriteTimeout() time.Duration {
+	if cfg.WebSocketWriteTimeout > 0 {
+		return time.Duration(cfg.WebSocketWriteTimeout) * time.Second
+	}
+	return 60 * time.Second
+}
+
+// GetWebSocketIdleTimeout returns the idle timeout in seconds with fallback to default
+func (cfg *Config) GetWebSocketIdleTimeout() time.Duration {
+	if cfg.WebSocketIdleTimeout > 0 {
+		return time.Duration(cfg.WebSocketIdleTimeout) * time.Second
+	}
+	return 300 * time.Second // Default: 5 minutes (300 seconds)
 }
 
 // IsDebugEnabled returns whether debug mode is enabled
@@ -149,7 +178,7 @@ func init() {
 	}
 }
 
-func InitLogger(cfg *Config) *slog.Logger {
+func InitLogger(cfg *Config) {
 	var handler slog.Handler
 	output := io.Discard
 
@@ -178,7 +207,8 @@ func InitLogger(cfg *Config) *slog.Logger {
 		handler = slog.NewTextHandler(output, opts)
 	}
 
-	return slog.New(handler)
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
 }
 
 func setupLogFile(cfg *Config) (io.Writer, error) {
@@ -320,15 +350,32 @@ func cleanupOldLogs(cfg *Config) error {
 func (cfg *Config) Validate() error {
 	var errors []string
 
-	// Validate interval
+	errors = append(errors, cfg.validateInterval()...)
+	errors = append(errors, cfg.validateTiming()...)
+	errors = append(errors, cfg.validateWebSocket()...)
+	errors = append(errors, cfg.validateActivityMode()...)
+	errors = append(errors, cfg.validateLogConfig()...)
+
+	if len(errors) > 0 {
+		return fmt.Errorf("configuration validation failed:\n  - %s", strings.Join(errors, "\n  - "))
+	}
+
+	return nil
+}
+
+func (cfg *Config) validateInterval() []string {
+	var errors []string
 	if cfg.Interval < 10 {
 		errors = append(errors, "interval must be at least 10 seconds")
 	}
 	if cfg.Interval > 3600 {
 		errors = append(errors, "interval must be no more than 3600 seconds (1 hour)")
 	}
+	return errors
+}
 
-	// Validate timing delays
+func (cfg *Config) validateTiming() []string {
+	var errors []string
 	if cfg.FocusDelayMs < 0 || cfg.FocusDelayMs > 1000 {
 		errors = append(errors, "focus delay must be between 0 and 1000 milliseconds")
 	}
@@ -341,16 +388,21 @@ func (cfg *Config) Validate() error {
 	if cfg.InputThresholdMs < 0 || cfg.InputThresholdMs > 5000 {
 		errors = append(errors, "input threshold must be between 0 and 5000 milliseconds")
 	}
+	return errors
+}
 
-	// Validate activity mode
-	if cfg.ActivityMode != "" {
-		am := strings.ToLower(cfg.ActivityMode)
-		if am != "focus" && am != "global" {
-			errors = append(errors, "activity mode must be 'focus' or 'global'")
-		}
+func (cfg *Config) validateWebSocket() []string {
+	var errors []string
+	if cfg.WebSocketReadTimeout < 0 || cfg.WebSocketReadTimeout > 3600 {
+		errors = append(errors, "WebSocket read timeout must be between 0 and 3600 seconds")
+	}
+	if cfg.WebSocketWriteTimeout < 0 || cfg.WebSocketWriteTimeout > 3600 {
+		errors = append(errors, "WebSocket write timeout must be between 0 and 3600 seconds")
+	}
+	if cfg.WebSocketIdleTimeout < 0 || cfg.WebSocketIdleTimeout > 36000 {
+		errors = append(errors, "WebSocket idle timeout must be between 0 and 36000 seconds")
 	}
 
-	// Validate port with additional security checks
 	if cfg.WebSocket {
 		if cfg.Port < 1024 {
 			errors = append(errors, "port must be at least 1024")
@@ -362,7 +414,7 @@ func (cfg *Config) Validate() error {
 		commonPorts := []int{80, 443, 8080, 8443, 3000, 3001, 5000, 5001}
 		for _, port := range commonPorts {
 			if cfg.Port == port {
-				fmt.Printf("⚠️  Warning: Port %d is commonly used and may conflict with other services\n", port)
+				slog.Warn("Port is commonly used and may conflict with other services", "port", port)
 				break
 			}
 		}
@@ -373,7 +425,22 @@ func (cfg *Config) Validate() error {
 			errors = append(errors, fmt.Sprintf("port %d is unavailable: %v", cfg.Port, err))
 		}
 	}
+	return errors
+}
 
+func (cfg *Config) validateActivityMode() []string {
+	var errors []string
+	if cfg.ActivityMode != "" {
+		am := strings.ToLower(cfg.ActivityMode)
+		if am != "focus" && am != "global" {
+			errors = append(errors, "activity mode must be 'focus' or 'global'")
+		}
+	}
+	return errors
+}
+
+func (cfg *Config) validateLogConfig() []string {
+	var errors []string
 	// Validate log format with additional security
 	if cfg.LogFormat != "" && cfg.LogFormat != "text" && cfg.LogFormat != "json" {
 		errors = append(errors, "log format must be 'text' or 'json'")
@@ -420,12 +487,7 @@ func (cfg *Config) Validate() error {
 			errors = append(errors, "max log age must be no more than 365 days")
 		}
 	}
-
-	if len(errors) > 0 {
-		return fmt.Errorf("configuration validation failed:\n  - %s", strings.Join(errors, "\n  - "))
-	}
-
-	return nil
+	return errors
 }
 
 func validateLogDirectory(logDir string) error {

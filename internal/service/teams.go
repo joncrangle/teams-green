@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -58,8 +60,6 @@ type WindowInfo struct {
 type WindowEnumContext struct {
 	windows          *[]WindowInfo
 	teamsExecutables []string
-	logger           *slog.Logger
-	mutex            *sync.Mutex
 }
 
 // ConfigProvider interface for configuration access
@@ -72,29 +72,30 @@ type ConfigProvider interface {
 	GetActivityMode() string
 }
 
-// (Deprecated) Previously exported SendKeyToWindow removed as focus-based key injection
-// is now handled internally with optional global mode fallback.
-
-// windowCache stores cached window handles with metadata
-type windowCache struct {
+// windowCacheSnapshot holds a thread-safe snapshot of window cache for concurrent access
+type windowCacheSnapshot struct {
 	handles   []win.HWND
 	timestamp time.Time
-	mutex     sync.RWMutex
+}
+
+// windowCacheWithAtomics provides thread-safe window cache operations
+type windowCacheWithAtomics struct {
+	snapshot atomic.Pointer[windowCacheSnapshot]
 }
 
 // TeamsManager manages interactions with Teams windows
 type TeamsManager struct {
 	now         func() time.Time
-	logger      *slog.Logger
 	config      ConfigProvider
 	enumContext *WindowEnumContext
 	retryState  struct {
 		FailureCount int
 	}
+	mu                 sync.Mutex
 	focusFailures      map[win.HWND]focusFailInfo
 	lastEscalation     map[win.HWND]time.Time
 	escalationCooldown time.Duration
-	windowCache        *windowCache
+	windowCache        *windowCacheWithAtomics
 	cacheTTL           time.Duration
 }
 
@@ -106,6 +107,16 @@ const (
 	foregroundVerificationChecks = 3
 	escalationCooldownDefault    = 3 * time.Minute
 	windowCacheTTLDefault        = 30 * time.Second
+
+	// Focus escalation timing delays (milliseconds)
+	focusRetryDelay       = 150 * time.Millisecond
+	setWindowPosDelay     = 50 * time.Millisecond
+	tripleAttachSleep     = 75 * time.Millisecond
+	foregroundVerifySleep = 25 * time.Millisecond
+	minimizeRestoreDelay  = 35 * time.Millisecond
+	minimizeCycleDelay    = 35 * time.Millisecond
+	restoreCycleDelay     = 55 * time.Millisecond
+	zOrderNudgeDelay      = 25 * time.Millisecond
 )
 
 type focusFailInfo struct {
@@ -116,6 +127,9 @@ type focusFailInfo struct {
 
 // recordFocusFailure updates failure tracking for a window focus attempt.
 func (tm *TeamsManager) recordFocusFailure(hWnd win.HWND, foregroundPID uint32) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
 	if tm.focusFailures == nil {
 		return
 	}
@@ -138,6 +152,9 @@ func (tm *TeamsManager) recordFocusFailure(hWnd win.HWND, foregroundPID uint32) 
 
 // resetFocusFailure clears failure tracking for a window after success.
 func (tm *TeamsManager) resetFocusFailure(hWnd win.HWND) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
 	if tm.focusFailures == nil {
 		return
 	}
@@ -147,6 +164,9 @@ func (tm *TeamsManager) resetFocusFailure(hWnd win.HWND) {
 // shouldSuppressFocus determines if further intrusive focus attempts should be skipped
 // for this window to avoid user disruption. Conservative defaults until configurable.
 func (tm *TeamsManager) shouldSuppressFocus(hWnd win.HWND, foregroundPID uint32) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
 	if tm.focusFailures == nil {
 		return false
 	}
@@ -159,13 +179,11 @@ func (tm *TeamsManager) shouldSuppressFocus(hWnd win.HWND, foregroundPID uint32)
 		now = tm.now()
 	}
 	if info.failCount >= focusFailureThreshold && info.lastForegroundPID == foregroundPID && now.Sub(info.lastFail) < focusFailureWindow {
-		if tm.logger != nil {
-			tm.logger.Debug("Focus suppression active",
-				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-				slog.Int("fail_count", info.failCount),
-				slog.Uint64("foreground_pid", uint64(foregroundPID)),
-				slog.Duration("since_last_fail", now.Sub(info.lastFail)))
-		}
+		slog.Debug("Focus suppression active",
+			slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+			slog.Int("fail_count", info.failCount),
+			slog.Uint64("foreground_pid", uint64(foregroundPID)),
+			slog.Duration("since_last_fail", now.Sub(info.lastFail)))
 		return true
 	}
 	if now.Sub(info.lastFail) > focusFailureRecordExpiry {
@@ -202,7 +220,7 @@ func enumWindowsProc(hwnd syscall.Handle, lParam uintptr) uintptr {
 	}
 
 	// Validate all required context fields before use
-	if ctx.windows == nil || ctx.teamsExecutables == nil || ctx.logger == nil {
+	if ctx.windows == nil || ctx.teamsExecutables == nil {
 		return 1
 	}
 
@@ -230,7 +248,7 @@ func enumWindowsProc(hwnd syscall.Handle, lParam uintptr) uintptr {
 	// Ensure handle is always closed, even if function returns early
 	defer func() {
 		if closeErr := windows.CloseHandle(hProcess); closeErr != nil {
-			ctx.logger.Debug("Failed to close process handle",
+			slog.Debug("Failed to close process handle",
 				slog.String("error", closeErr.Error()),
 				slog.Uint64("pid", uint64(pid)),
 				slog.Uint64("handle", uint64(uintptr(hProcess))))
@@ -240,7 +258,7 @@ func enumWindowsProc(hwnd syscall.Handle, lParam uintptr) uintptr {
 	var exeName [windows.MAX_PATH]uint16
 	size := uint32(len(exeName))
 	if err := windows.QueryFullProcessImageName(hProcess, 0, &exeName[0], &size); err != nil {
-		ctx.logger.Debug("Failed to get process image name",
+		slog.Debug("Failed to get process image name",
 			slog.Uint64("pid", uint64(pid)),
 			slog.String("error", err.Error()))
 		return 1
@@ -320,7 +338,7 @@ func (tm *TeamsManager) validateCachedWindows(cached []win.HWND) []win.HWND {
 		if tm.isWindowValid(hWnd) {
 			valid = append(valid, hWnd)
 		} else {
-			tm.logger.Debug("Removing invalid window from cache",
+			slog.Debug("Removing invalid window from cache",
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 		}
 	}
@@ -330,6 +348,11 @@ func (tm *TeamsManager) validateCachedWindows(cached []win.HWND) []win.HWND {
 // isCacheExpired checks if the window cache has exceeded its TTL
 func (tm *TeamsManager) isCacheExpired() bool {
 	if tm.windowCache == nil {
+		return true
+	}
+
+	snap := tm.windowCache.snapshot.Load()
+	if snap == nil {
 		return true
 	}
 
@@ -343,11 +366,7 @@ func (tm *TeamsManager) isCacheExpired() bool {
 		ttl = windowCacheTTLDefault
 	}
 
-	tm.windowCache.mutex.RLock()
-	expired := now.Sub(tm.windowCache.timestamp) > ttl
-	tm.windowCache.mutex.RUnlock()
-
-	return expired
+	return now.Sub(snap.timestamp) > ttl
 }
 
 // updateWindowCache stores new window handles in the cache with current timestamp
@@ -361,12 +380,12 @@ func (tm *TeamsManager) updateWindowCache(handles []win.HWND) {
 		now = tm.now()
 	}
 
-	tm.windowCache.mutex.Lock()
-	tm.windowCache.handles = handles
-	tm.windowCache.timestamp = now
-	tm.windowCache.mutex.Unlock()
+	tm.windowCache.snapshot.Store(&windowCacheSnapshot{
+		handles:   handles,
+		timestamp: now,
+	})
 
-	tm.logger.Debug("Updated window cache",
+	slog.Debug("Updated window cache",
 		slog.Int("count", len(handles)),
 		slog.Time("timestamp", now))
 }
@@ -377,33 +396,42 @@ func (tm *TeamsManager) getCachedWindows() []win.HWND {
 		return nil
 	}
 
-	// Check if cache is expired
-	if tm.isCacheExpired() {
-		tm.logger.Debug("Window cache expired")
+	snap := tm.windowCache.snapshot.Load()
+	if snap == nil {
 		return nil
 	}
 
-	tm.windowCache.mutex.RLock()
-	cached := tm.windowCache.handles
-	tm.windowCache.mutex.RUnlock()
+	if tm.isCacheExpired() {
+		slog.Debug("Window cache expired")
+		return nil
+	}
 
-	// Validate cached handles
+	cached := snap.handles
+
 	if len(cached) == 0 {
 		return nil
 	}
 
 	validated := tm.validateCachedWindows(cached)
 	if len(validated) == 0 {
-		tm.logger.Debug("No valid windows in cache after validation")
+		slog.Debug("No valid windows in cache after validation")
 		return nil
 	}
 
-	// Update cache with validated handles if some were removed
 	if len(validated) != len(cached) {
-		tm.updateWindowCache(validated)
+		newSnap := &windowCacheSnapshot{
+			handles:   validated,
+			timestamp: snap.timestamp, // Keep original timestamp
+		}
+		// Try to update, but don't worry if it fails (another thread updated it)
+		tm.windowCache.snapshot.CompareAndSwap(snap, newSnap)
+
+		slog.Debug("Updated window cache after validation",
+			slog.Int("count", len(validated)),
+			slog.Time("timestamp", snap.timestamp))
 	}
 
-	tm.logger.Debug("Using cached window handles",
+	slog.Debug("Using cached window handles",
 		slog.Int("count", len(validated)))
 
 	return validated
@@ -416,7 +444,7 @@ func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
 	}
 
 	// Cache miss or expired - perform full enumeration
-	tm.logger.Debug("Cache miss - performing full window enumeration")
+	slog.Debug("Cache miss - performing full window enumeration")
 	var windowList []WindowInfo
 	tm.enumContext.windows = &windowList
 
@@ -424,8 +452,11 @@ func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
 		syscall.NewCallback(enumWindowsProc),
 		uintptr(unsafe.Pointer(tm.enumContext)),
 	)
+	// Ensure enumContext remains reachable until callback returns
+	runtime.KeepAlive(tm.enumContext)
+
 	if ret == 0 {
-		tm.logger.Debug("EnumWindows failed", slog.String("error", err.Error()))
+		slog.Debug("EnumWindows failed", slog.String("error", err.Error()))
 		// Ensure we always return a valid slice, never nil
 		return make([]win.HWND, 0)
 	}
@@ -444,10 +475,10 @@ func (tm *TeamsManager) FindTeamsWindows() []win.HWND {
 	// Update cache with newly enumerated windows (even if empty)
 	tm.updateWindowCache(hwnds)
 	if len(hwnds) > 0 {
-		tm.logger.Debug("Found and cached Teams windows",
+		slog.Debug("Found and cached Teams windows",
 			slog.Int("count", len(hwnds)))
 	} else {
-		tm.logger.Debug("No Teams windows found, cached empty result")
+		slog.Debug("No Teams windows found, cached empty result")
 	}
 
 	return hwnds
@@ -472,7 +503,7 @@ func (tm *TeamsManager) setWindowFocusFromPIP(hWnd win.HWND) error {
 	var pipPID uint32
 	pipThreadID, _, _ := procGetWindowThreadProcessID.Call(currentFocus, uintptr(unsafe.Pointer(&pipPID)))
 
-	tm.logger.Debug("Attempting focus switch from PIP window",
+	slog.Debug("Attempting focus switch from PIP window",
 		slog.Uint64("pip_hwnd", uint64(currentFocus)),
 		slog.Uint64("pip_thread", uint64(pipThreadID)),
 		slog.Uint64("target_hwnd", uint64(uintptr(hWnd))),
@@ -487,7 +518,7 @@ func (tm *TeamsManager) setWindowFocusFromPIP(hWnd win.HWND) error {
 			0, 0, 0, 0,
 			swpNomove|swpNosize)
 		if ret != 0 {
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(setWindowPosDelay)
 		}
 
 		// Method 2: Triple thread attach - attach our thread to PIP, then PIP to target
@@ -500,7 +531,7 @@ func (tm *TeamsManager) setWindowFocusFromPIP(hWnd win.HWND) error {
 				if attach2 != 0 {
 					// Now try to set foreground with all threads attached
 					_, _, _ = procSetForegroundWindow.Call(uintptr(hWnd))
-					time.Sleep(75 * time.Millisecond)
+					time.Sleep(tripleAttachSleep)
 
 					// Detach in reverse order
 					_, _, _ = procAttachThreadInput.Call(pipThreadID, targetThreadID, 0)
@@ -520,7 +551,7 @@ func (tm *TeamsManager) setWindowFocusFromPIP(hWnd win.HWND) error {
 				// Always detach
 				_, _, _ = procAttachThreadInput.Call(currentThreadID, targetThreadID, 0)
 
-				time.Sleep(75 * time.Millisecond)
+				time.Sleep(tripleAttachSleep)
 			}
 		}
 
@@ -528,21 +559,21 @@ func (tm *TeamsManager) setWindowFocusFromPIP(hWnd win.HWND) error {
 		for i := range foregroundVerificationChecks {
 			focusedWindow, _, _ := procGetForegroundWindow.Call()
 			if focusedWindow == uintptr(hWnd) {
-				tm.logger.Debug("Successfully set focus from PIP window",
+				slog.Debug("Successfully set focus from PIP window",
 					slog.Uint64("hwnd", uint64(uintptr(hWnd))),
 					slog.Int("attempt", attempt+1),
 					slog.Int("verify_attempt", i+1))
 				return nil
 			}
 			if i < 2 {
-				time.Sleep(25 * time.Millisecond)
+				time.Sleep(foregroundVerifySleep)
 			}
 		}
 
 		// Log failure details for debugging
 		if attempt < maxRetries-1 {
 			currentFocusWindow, _, _ := procGetForegroundWindow.Call()
-			tm.logger.Debug("PIP focus attempt failed, retrying",
+			slog.Debug("PIP focus attempt failed, retrying",
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
 				slog.Uint64("current_focus", uint64(currentFocusWindow)),
 				slog.Int("attempt", attempt+1))
@@ -554,9 +585,25 @@ func (tm *TeamsManager) setWindowFocusFromPIP(hWnd win.HWND) error {
 }
 
 // enhancedAttachFocus attempts a more forceful yet controlled foreground switch using
-// staged AttachThreadInput and optional BringWindowToTop only on escalation.
-// canEscalateStage3 determines whether stage 3 focus escalation is permitted.
-// Returns (allowed, reason). If not allowed, reason is a concise identifier (cooldown, minimized, no_tracking).
+// staged escalation with Z-order manipulation and thread attachment.
+//
+// Stage 1: Gentle attempt with ShowWindow(SW_MINIMIZE) + ShowWindow(SW_RESTORE) cycle
+//   - Creates a user-like interaction timestamp
+//   - Works well with Electron apps that respect recent interaction
+//   - Delay: ~100ms
+//
+// Stage 2: Thread attachment + Z-order nudges (TOP -> TOPMOST -> NOTOPMOST)
+//   - AttachThreadInput allows bypassing foreground lock
+//   - Z-order manipulation without activation
+//   - Delay: ~185ms total
+//
+// Stage 3 (conditional): Full escalation with repeated visibility cycle
+//   - Skipped if window is minimized to avoid flicker
+//   - Skipped if cooldown period active (3 min default)
+//   - Most intrusive: full minimize/restore + TOPMOST sequence
+//   - Delay: ~240ms total
+//
+// Returns nil on success, error on failure, or errStage3Skipped if stage 3 was not executed
 func (tm *TeamsManager) canEscalateStage3(hWnd win.HWND) (bool, string) {
 	if hWnd == 0 {
 		return false, "invalid_hwnd"
@@ -566,6 +613,10 @@ func (tm *TeamsManager) canEscalateStage3(hWnd win.HWND) (bool, string) {
 	if isMinimized != 0 {
 		return false, "minimized"
 	}
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
 	if tm.lastEscalation == nil {
 		return true, "ok"
 	}
@@ -619,26 +670,24 @@ func (tm *TeamsManager) enhancedAttachFocus(hWnd win.HWND) error {
 	if isMinimized != 0 {
 		// If already minimized, just restore (avoid extra flicker)
 		_, _, _ = procShowWindow.Call(uintptr(hWnd), swRestore)
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(minimizeRestoreDelay)
 	} else {
 		// Minimize + restore cycle to create a recent user-like interaction timestamp
 		_, _, _ = procShowWindow.Call(uintptr(hWnd), swMinimize)
-		time.Sleep(35 * time.Millisecond)
+		time.Sleep(minimizeCycleDelay)
 		_, _, _ = procShowWindow.Call(uintptr(hWnd), swRestore)
-		time.Sleep(55 * time.Millisecond)
+		time.Sleep(restoreCycleDelay)
 	}
 	_, _, _ = procAllowSetForegroundWindow.Call(uintptr(targetPID))
 	_, _, _ = procSetForegroundWindow.Call(uintptr(hWnd))
 	time.Sleep(90 * time.Millisecond) // slightly longer than original 60ms to survive foreground lock timing
 	fw, _, _ := procGetForegroundWindow.Call()
 	if fw == uintptr(hWnd) {
-		if tm.logger != nil {
-			elapsed := time.Since(start)
-			tm.logger.Debug("Focus escalation stage 1 success",
-				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-				slog.Int("stage", 1),
-				slog.Duration("elapsed", elapsed))
-		}
+		elapsed := time.Since(start)
+		slog.Debug("Focus escalation stage 1 success",
+			slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+			slog.Int("stage", 1),
+			slog.Duration("elapsed", elapsed))
 		return nil
 	}
 
@@ -648,9 +697,9 @@ func (tm *TeamsManager) enhancedAttachFocus(hWnd win.HWND) error {
 	if attachRet != 0 {
 		// Z-order manipulations without activation to influence foreground eligibility
 		_, _, _ = procSetWindowPos.Call(uintptr(hWnd), hwndTop, 0, 0, 0, 0, uintptr(swpNomove|swpNosize|swpNoactivate))
-		time.Sleep(25 * time.Millisecond)
+		time.Sleep(zOrderNudgeDelay)
 		_, _, _ = procSetWindowPos.Call(uintptr(hWnd), hwndTopmost, 0, 0, 0, 0, uintptr(swpNomove|swpNosize|swpNoactivate))
-		time.Sleep(25 * time.Millisecond)
+		time.Sleep(zOrderNudgeDelay)
 		_, _, _ = procSetWindowPos.Call(uintptr(hWnd), hwndNotopmost, 0, 0, 0, 0, uintptr(swpNomove|swpNosize|swpNoactivate))
 		// Final foreground attempt for stage 2
 		_, _, _ = procSetForegroundWindow.Call(uintptr(hWnd))
@@ -659,13 +708,11 @@ func (tm *TeamsManager) enhancedAttachFocus(hWnd win.HWND) error {
 		// Always detach after attempt
 		_, _, _ = procAttachThreadInput.Call(currentThreadID, targetThreadID, 0)
 		if fw2 == uintptr(hWnd) {
-			if tm.logger != nil {
-				elapsed := time.Since(start)
-				tm.logger.Debug("Focus escalation stage 2 success",
-					slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-					slog.Int("stage", 2),
-					slog.Duration("elapsed", elapsed))
-			}
+			elapsed := time.Since(start)
+			slog.Debug("Focus escalation stage 2 success",
+				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+				slog.Int("stage", 2),
+				slog.Duration("elapsed", elapsed))
 			return nil
 		}
 	}
@@ -673,14 +720,12 @@ func (tm *TeamsManager) enhancedAttachFocus(hWnd win.HWND) error {
 	// -----------------------------
 	// Stage 3 eligibility (cooldown / minimized avoidance)
 	if ok, reason := tm.canEscalateStage3(hWnd); !ok {
-		if tm.logger != nil {
-			elapsed := time.Since(start)
-			tm.logger.Debug("Focus escalation stage 3 skipped",
-				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-				slog.Int("stage", 3),
-				slog.String("reason", reason),
-				slog.Duration("elapsed", elapsed))
-		}
+		elapsed := time.Since(start)
+		slog.Debug("Focus escalation stage 3 skipped",
+			slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+			slog.Int("stage", 3),
+			slog.String("reason", reason),
+			slog.Duration("elapsed", elapsed))
 		return errStage3Skipped
 	}
 
@@ -721,25 +766,23 @@ func (tm *TeamsManager) enhancedAttachFocus(hWnd win.HWND) error {
 				if tm.now != nil {
 					now = tm.now()
 				}
+				tm.mu.Lock()
 				tm.lastEscalation[hWnd] = now
+				tm.mu.Unlock()
 			}
-			if tm.logger != nil {
-				elapsed := time.Since(start)
-				tm.logger.Debug("Focus escalation stage 3 success",
-					slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-					slog.Int("stage", 3),
-					slog.Duration("elapsed", elapsed))
-			}
+			elapsed := time.Since(start)
+			slog.Debug("Focus escalation stage 3 success",
+				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+				slog.Int("stage", 3),
+				slog.Duration("elapsed", elapsed))
 			return nil
 		}
 	}
 
-	if tm.logger != nil {
-		elapsed := time.Since(start)
-		tm.logger.Debug("Focus escalation failed",
-			slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-			slog.Duration("elapsed", elapsed))
-	}
+	elapsed := time.Since(start)
+	slog.Debug("Focus escalation failed",
+		slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+		slog.Duration("elapsed", elapsed))
 	return fmt.Errorf("enhanced focus attempts failed")
 }
 
@@ -764,22 +807,22 @@ func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 		// Allow the target process to set foreground window
 		allowRet, _, _ := procAllowSetForegroundWindow.Call(uintptr(targetPID))
 		if allowRet == 0 {
-			tm.logger.Debug("AllowSetForegroundWindow failed (expected on restricted systems)",
+			slog.Debug("AllowSetForegroundWindow failed (expected on restricted systems)",
 				slog.Uint64("pid", uint64(targetPID)))
 		}
 
 		// Stealth mode: skip BringWindowToTop to avoid flashing
 		// Try normal SetForegroundWindow first
-		setFgRet, _, setFgErr := procSetForegroundWindow.Call(uintptr(hWnd))
+		_, _, _ = procSetForegroundWindow.Call(uintptr(hWnd))
 
 		// Give Windows more time to process the focus change for Electron apps
-		time.Sleep(75 * time.Millisecond)
+		time.Sleep(tripleAttachSleep)
 
 		// Check multiple times with short intervals to catch delayed focus changes
 		for i := range foregroundVerificationChecks {
 			focusedWindow, _, _ := procGetForegroundWindow.Call()
 			if focusedWindow == uintptr(hWnd) {
-				tm.logger.Debug("Focus set successfully with SetForegroundWindow",
+				slog.Debug("Focus set successfully with SetForegroundWindow",
 					slog.Uint64("hwnd", uint64(uintptr(hWnd))),
 					slog.Int("attempt", attempt+1),
 					slog.Int("verify_attempt", i+1))
@@ -801,7 +844,7 @@ func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 				// Always detach threads, even if focus setting failed
 				detachRet, _, _ := procAttachThreadInput.Call(currentThreadID, targetThreadID, 0)
 				if detachRet == 0 {
-					tm.logger.Debug("Failed to detach thread input",
+					slog.Debug("Failed to detach thread input",
 						slog.Uint64("current_thread", uint64(currentThreadID)),
 						slog.Uint64("target_thread", uint64(targetThreadID)))
 				}
@@ -812,7 +855,7 @@ func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 					for i := range foregroundVerificationChecks {
 						focusedWindow, _, _ := procGetForegroundWindow.Call()
 						if focusedWindow == uintptr(hWnd) {
-							tm.logger.Debug("Focus set successfully with AttachThreadInput",
+							slog.Debug("Focus set successfully with AttachThreadInput",
 								slog.Uint64("hwnd", uint64(uintptr(hWnd))),
 								slog.Int("attempt", attempt+1),
 								slog.Int("verify_attempt", i+1))
@@ -824,7 +867,7 @@ func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 					}
 				}
 			} else {
-				tm.logger.Debug("Failed to attach thread input",
+				slog.Debug("Failed to attach thread input",
 					slog.Uint64("current_thread", uint64(currentThreadID)),
 					slog.Uint64("target_thread", uint64(targetThreadID)))
 			}
@@ -833,21 +876,18 @@ func (tm *TeamsManager) setWindowFocus(hWnd win.HWND) error {
 		// Log failure details for debugging, but only if not last attempt
 		if attempt < maxRetries-1 {
 			currentFocusWindow, _, _ := procGetForegroundWindow.Call()
-			tm.logger.Debug("Focus attempt failed, retrying",
-				slog.String("setfg_error", setFgErr.Error()),
-				slog.Bool("setfg_success", setFgRet != 0),
-				slog.Bool("allow_success", allowRet != 0),
+			slog.Debug("Focus attempt failed, retrying",
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
 				slog.Uint64("current_focus", uint64(currentFocusWindow)),
 				slog.Int("attempt", attempt+1))
-			time.Sleep(retryDelay)
+			time.Sleep(focusRetryDelay)
 		}
 	}
 
 	// Final attempt: sometimes focus works on the last try even if API calls fail
 	finalFocus, _, _ := procGetForegroundWindow.Call()
 	if finalFocus == uintptr(hWnd) {
-		tm.logger.Debug("Focus was set despite API failures",
+		slog.Debug("Focus was set despite API failures",
 			slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 		return nil
 	}
@@ -933,7 +973,7 @@ func (tm *TeamsManager) isPIPWindow(hWnd win.HWND) bool {
 	if isBrowser {
 		// For browsers, look for small topmost windows (typical PIP behavior)
 		if hasTopmost && width > 120 && height > 80 && width < 1000 && height < 800 {
-			tm.logger.Debug("Detected browser PIP window by process and attributes",
+			slog.Debug("Detected browser PIP window by process and attributes",
 				slog.String("browser", exeBase),
 				slog.Int("width", width),
 				slog.Int("height", height),
@@ -948,7 +988,7 @@ func (tm *TeamsManager) isPIPWindow(hWnd win.HWND) bool {
 			// Additional check: small browser windows are likely PIP
 			aspectRatio := float64(width) / float64(height)
 			if aspectRatio > 1.2 && aspectRatio < 3.0 { // Typical video aspect ratios
-				tm.logger.Debug("Detected likely browser PIP window by size and aspect ratio",
+				slog.Debug("Detected likely browser PIP window by size and aspect ratio",
 					slog.String("browser", exeBase),
 					slog.Int("width", width),
 					slog.Int("height", height),
@@ -961,7 +1001,7 @@ func (tm *TeamsManager) isPIPWindow(hWnd win.HWND) bool {
 	} else {
 		// For non-browser windows, use the original logic (topmost + size)
 		if hasTopmost && width > 120 && height > 80 && width < 800 && height < 600 {
-			tm.logger.Debug("Detected likely PIP window by size and topmost attribute",
+			slog.Debug("Detected likely PIP window by size and topmost attribute",
 				slog.String("process", exeBase),
 				slog.Int("width", width),
 				slog.Int("height", height),
@@ -981,7 +1021,7 @@ func (tm *TeamsManager) shouldRestoreFocus(hWnd win.HWND) bool {
 	// Add safety check to prevent panic
 	defer func() {
 		if r := recover(); r != nil {
-			tm.logger.Debug("Panic recovered in shouldRestoreFocus",
+			slog.Debug("Panic recovered in shouldRestoreFocus",
 				slog.Any("panic", r),
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 		}
@@ -989,7 +1029,7 @@ func (tm *TeamsManager) shouldRestoreFocus(hWnd win.HWND) bool {
 
 	// Don't restore focus to PIP windows as they can cause focus conflicts
 	if tm.isPIPWindow(hWnd) {
-		tm.logger.Debug("Skipping focus restoration to PIP window",
+		slog.Debug("Skipping focus restoration to PIP window",
 			slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 		return false
 	}
@@ -997,7 +1037,7 @@ func (tm *TeamsManager) shouldRestoreFocus(hWnd win.HWND) bool {
 	// Check if window is still visible and valid
 	ret, _, _ := procIsWindowVisible.Call(uintptr(hWnd))
 	if ret == 0 {
-		tm.logger.Debug("Skipping focus restoration to invisible window",
+		slog.Debug("Skipping focus restoration to invisible window",
 			slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 		return false
 	}
@@ -1009,7 +1049,7 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 	// Add panic recovery at the top level
 	defer func() {
 		if r := recover(); r != nil {
-			tm.logger.Error("Panic recovered in SendKeysToTeams",
+			slog.Error("Panic recovered in SendKeysToTeams",
 				slog.Any("panic", r))
 		}
 	}()
@@ -1024,9 +1064,9 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 	if tm.config != nil {
 		inputThreshold = tm.config.GetInputThreshold()
 	}
-	inputDetector := NewInputDetectorWithThreshold(tm.logger, inputThreshold)
+	inputDetector := NewInputDetectorWithThreshold(inputThreshold)
 	if inputDetector.IsUserInputActive() {
-		tm.logger.Debug("User input detected, deferring Teams key send to avoid interference")
+		slog.Debug("User input detected, deferring Teams key send to avoid interference")
 		return ErrUserInputActive
 	}
 
@@ -1034,9 +1074,9 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 	if tm.config != nil && tm.config.GetActivityMode() == "global" {
 		const vkF15 = 0x7E
 		if err := sendVirtualKey(uint16(vkF15)); err != nil {
-			return fmt.Errorf("global key send failed: %w", err)
+			return fmt.Errorf("❌ global key send failed: %w", err)
 		}
-		tm.logger.Debug("Sent global F15 key (activity-mode=global)")
+		slog.Debug("Sent global F15 key (activity-mode=global)")
 		return nil
 	}
 
@@ -1086,13 +1126,13 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 					} else {
 						exeBase = exePath
 					}
-					tm.logger.Debug("Current foreground before focus attempt",
+					slog.Debug("Current foreground before focus attempt",
 						slog.Uint64("fg_hwnd", uint64(currentWindow)),
 						slog.Uint64("fg_pid", uint64(pid)),
 						slog.String("fg_exe", exeBase))
 				}
 				if err := windows.CloseHandle(hProcess); err != nil {
-					tm.logger.Debug("Failed to close process handle in current window detection",
+					slog.Debug("Failed to close process handle in current window detection",
 						slog.String("error", err.Error()),
 						slog.Uint64("pid", uint64(pid)))
 				}
@@ -1101,7 +1141,7 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 
 		// Log if current window is a PIP window for debugging
 		if tm.isPIPWindow(currentWindowHandle) {
-			tm.logger.Debug("Detected PIP window has focus, will use specialized focus switching",
+			slog.Debug("Detected PIP window has focus, will use specialized focus switching",
 				slog.Uint64("pip_hwnd", uint64(currentWindow)))
 		}
 	}
@@ -1124,20 +1164,20 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 
 		// Suppress intrusive focus attempts if recent repeated failures
 		if tm.shouldSuppressFocus(hWnd, fgPID) {
-			tm.logger.Debug("Suppressing focus attempts due to recent failures",
+			slog.Debug("Suppressing focus attempts due to recent failures",
 				slog.Uint64("hwnd", uint64(uintptr(hWnd))),
 				slog.Uint64("current_focus", uint64(currentFocus)),
 				slog.Int("failure_streak", tm.focusFailures[hWnd].failCount))
 			// Fallback: attempt background key send only
 			if err := sendVirtualKey(uint16(vkF15)); err == nil {
 				successCount++
-				tm.logger.Debug("Sent F15 in suppressed background mode",
+				slog.Debug("Sent F15 in suppressed background mode",
 					slog.Uint64("hwnd", uint64(uintptr(hWnd))))
 			}
 			continue
 		}
 
-		tm.logger.Debug("Teams window focus check before key send",
+		slog.Debug("Teams window focus check before key send",
 			slog.Uint64("teams_hwnd", uint64(uintptr(hWnd))),
 			slog.Uint64("current_focus", uint64(currentFocus)),
 			slog.Bool("has_focus", currentFocus == uintptr(hWnd)))
@@ -1191,11 +1231,9 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 			if errors.Is(focusErr, errStage3Skipped) {
 				if err := sendVirtualKey(uint16(vkF15)); err == nil {
 					successCount++
-					if tm.logger != nil {
-						tm.logger.Debug("Sent F15 after non-escalated focus attempt",
-							slog.Uint64("hwnd", uint64(uintptr(hWnd))),
-							slog.String("escalation", "skipped"))
-					}
+					slog.Debug("Sent F15 after non-escalated focus attempt",
+						slog.Uint64("hwnd", uint64(uintptr(hWnd))),
+						slog.String("escalation", "skipped"))
 				} else {
 					lastError = err
 				}
@@ -1254,25 +1292,25 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 			lastErr := syscall.GetLastError()
 			if errnoVal, ok := lastErr.(syscall.Errno); ok && errnoVal != 0 {
 				// We have a real Windows error code
-				tm.logger.Debug("Failed to restore focus to original window",
+				slog.Debug("Failed to restore focus to original window",
 					slog.Uint64("hwnd", uint64(currentWindow)),
 					slog.Int("last_error_code", int(errnoVal)),
 					slog.String("error", errnoVal.Error()))
 			} else {
 				// Either no error or not an errno; treat as focus blocked by heuristics
-				tm.logger.Debug("Restore focus blocked by OS focus rules",
+				slog.Debug("Restore focus blocked by OS focus rules",
 					slog.String("detail", "SetForegroundWindow returned 0 with no actionable last error"),
 					slog.Uint64("hwnd", uint64(currentWindow)))
 			}
 			_ = callErr // suppress unused warning
 		} else {
-			tm.logger.Debug("Successfully restored focus to original window",
+			slog.Debug("Successfully restored focus to original window",
 				slog.Uint64("hwnd", uint64(currentWindow)))
 		}
 	}
 
 	if successCount > 0 {
-		tm.logger.Debug("Sent keys to Teams windows",
+		slog.Debug("Sent keys to Teams windows",
 			slog.String("keys", "F15"),
 			slog.Int("window_count", successCount),
 			slog.Int("total_windows", len(hwnds)),
@@ -1283,12 +1321,12 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 	}
 
 	if lastError != nil {
-		return fmt.Errorf("failed to send keys to any Teams window: %v", lastError)
+		return fmt.Errorf("❌ failed to send keys to any Teams window: %w", lastError)
 	}
-	return fmt.Errorf("failed to send keys to any Teams window")
+	return fmt.Errorf("❌ failed to send keys to any Teams window")
 }
 
 func (tm *TeamsManager) handleTeamsNotFound(_ *websocket.ServiceState) error {
 	tm.retryState.FailureCount++
-	return fmt.Errorf("no Teams windows found")
+	return fmt.Errorf("❌ no Teams windows found")
 }

@@ -30,22 +30,19 @@ type InputDetector interface {
 
 // inputDetector implementation
 type inputDetector struct {
-	logger    *slog.Logger
 	threshold time.Duration
 }
 
 // NewInputDetector creates a new input detector with default threshold (2000ms)
-func NewInputDetector(logger *slog.Logger) InputDetector {
+func NewInputDetector() InputDetector {
 	return &inputDetector{
-		logger:    logger,
 		threshold: 2000 * time.Millisecond, // Default threshold
 	}
 }
 
 // NewInputDetectorWithThreshold creates a new input detector with custom threshold
-func NewInputDetectorWithThreshold(logger *slog.Logger, threshold time.Duration) InputDetector {
+func NewInputDetectorWithThreshold(threshold time.Duration) InputDetector {
 	return &inputDetector{
-		logger:    logger,
 		threshold: threshold,
 	}
 }
@@ -63,19 +60,20 @@ func (id *inputDetector) GetTimeSinceLastInput() time.Duration {
 	ret, _, _ := procGetLastInputInfo.Call(uintptr(unsafe.Pointer(&lii)))
 	if ret == 0 {
 		// API call failed - assume no recent input for safety
-		id.logger.Debug("GetLastInputInfo failed, assuming no recent input")
+		slog.Debug("GetLastInputInfo failed, assuming no recent input")
 		return time.Hour
 	}
 
 	currentTick, _, _ := procGetTickCount.Call()
 
 	// Handle tick count wraparound (occurs every ~49.7 days of system uptime)
-	var timeSinceInput uintptr
+	// Use 64-bit arithmetic to prevent overflow when adding two 32-bit values
+	var timeSinceInput uint64
 	if currentTick >= uintptr(lii.dwTime) {
-		timeSinceInput = currentTick - uintptr(lii.dwTime)
+		timeSinceInput = uint64(currentTick) - uint64(lii.dwTime)
 	} else {
 		// Wraparound occurred: calculate elapsed time across the boundary
-		timeSinceInput = (0xFFFFFFFF - uintptr(lii.dwTime)) + currentTick
+		timeSinceInput = (uint64(0xFFFFFFFF) - uint64(lii.dwTime)) + uint64(currentTick)
 	}
 
 	return time.Duration(timeSinceInput) * time.Millisecond
@@ -87,7 +85,7 @@ func (id *inputDetector) IsUserInputActive() bool {
 	timeSince := id.GetTimeSinceLastInput()
 
 	if timeSince < id.threshold {
-		id.logger.Debug("Recent user input detected",
+		slog.Debug("Recent user input detected",
 			slog.Duration("time_since_input", timeSince),
 			slog.Duration("threshold", id.threshold))
 		return true

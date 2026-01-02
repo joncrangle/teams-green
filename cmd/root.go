@@ -30,7 +30,7 @@ var rootCmd = &cobra.Command{
 	Short: "Keep that Teams status green",
 	Long: `Teams-Green keeps your Microsoft Teams status active by sending 
 periodic keys to prevent the status from going idle.`,
-	Version: "0.5.1",
+	Version: "0.5.2",
 }
 
 var versionCmd = &cobra.Command{
@@ -58,7 +58,7 @@ var startCmd = &cobra.Command{
 		}
 
 		if err := service.Start(cfg); err != nil {
-			return fmt.Errorf("❌ %v", err)
+			return fmt.Errorf("❌ %w", err)
 		}
 
 		if !cfg.Debug {
@@ -77,7 +77,7 @@ var stopCmd = &cobra.Command{
 	Long:  "Stop the running Teams-Green process",
 	RunE: func(_ *cobra.Command, _ []string) error {
 		if err := service.Stop(); err != nil {
-			return fmt.Errorf("❌ %v", err)
+			return fmt.Errorf("❌ failed to stop service: %w", err)
 		}
 		return nil
 	},
@@ -90,7 +90,7 @@ var statusCmd = &cobra.Command{
 	RunE: func(_ *cobra.Command, _ []string) error {
 		running, pid, info, err := service.GetEnhancedStatus()
 		if err != nil {
-			return fmt.Errorf("❌ %v", err)
+			return fmt.Errorf("❌ failed to get service status: %w", err)
 		}
 
 		if running {
@@ -115,7 +115,7 @@ var toggleCmd = &cobra.Command{
 	RunE: func(_ *cobra.Command, _ []string) error {
 		running, _, _, err := service.GetEnhancedStatus()
 		if err != nil {
-			return fmt.Errorf("❌ %v", err)
+			return fmt.Errorf("❌ failed to get service status: %w", err)
 		}
 
 		if running {
@@ -131,7 +131,7 @@ var toggleCmd = &cobra.Command{
 		}
 
 		if err := service.Start(cfg); err != nil {
-			return fmt.Errorf("❌ %v", err)
+			return fmt.Errorf("❌ failed to start service: %w", err)
 		}
 
 		if !cfg.Debug {

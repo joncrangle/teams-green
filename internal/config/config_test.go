@@ -171,47 +171,37 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
-func TestInitLoggerDebugMode(t *testing.T) {
+func TestInitLoggerDebugMode(_ *testing.T) {
 	cfg := &Config{
 		Debug:     true,
 		LogFormat: "text",
 	}
 
-	logger := InitLogger(cfg)
-	if logger == nil {
-		t.Errorf("expected logger but got nil")
-	}
+	InitLogger(cfg)
+	// Logger is now set globally, no return value to check
 }
 
-func TestInitLoggerJSONFormat(t *testing.T) {
+func TestInitLoggerJSONFormat(_ *testing.T) {
 	cfg := &Config{
 		Debug:     true,
 		LogFormat: "json",
 	}
 
-	logger := InitLogger(cfg)
-	if logger == nil {
-		t.Errorf("expected logger but got nil")
-	}
+	InitLogger(cfg)
+	// Logger is now set globally, no return value to check
 }
 
 func TestInitLoggerWithLogFile(t *testing.T) {
-	tempDir := t.TempDir()
-	logFile := filepath.Join(tempDir, "test.log")
-
 	cfg := &Config{
-		Debug:     false,
-		LogFormat: "text",
-		LogFile:   logFile,
+		Debug:   false,
+		LogFile: filepath.Join(t.TempDir(), "test.log"),
 	}
 
-	logger := InitLogger(cfg)
-	if logger == nil {
-		t.Errorf("expected logger but got nil")
-	}
+	InitLogger(cfg)
+	// Logger is now set globally, no return value to check
 
 	// Check if log file was created
-	if _, err := os.Stat(logFile); os.IsNotExist(err) {
+	if _, err := os.Stat(cfg.LogFile); os.IsNotExist(err) {
 		t.Errorf("log file should have been created")
 	}
 
@@ -224,22 +214,16 @@ func TestInitLoggerWithLogFile(t *testing.T) {
 }
 
 func TestInitLoggerWithRotation(t *testing.T) {
-	tempDir := t.TempDir()
-	logFile := filepath.Join(tempDir, "test.log")
-
 	cfg := &Config{
 		Debug:      false,
-		LogFormat:  "text",
-		LogFile:    logFile,
+		LogFile:    filepath.Join(t.TempDir(), "test.log"),
 		LogRotate:  true,
 		MaxLogSize: 1,
-		MaxLogAge:  1,
+		MaxLogAge:  30,
 	}
 
-	logger := InitLogger(cfg)
-	if logger == nil {
-		t.Errorf("expected logger but got nil")
-	}
+	InitLogger(cfg)
+	// Logger is now set globally, no return value to check
 
 	// Explicitly close log file to prevent file locking issues on Windows
 	CloseLogFile()
@@ -403,9 +387,9 @@ func TestDelayMethods(t *testing.T) {
 				KeyProcessDelayMs: 0,
 			},
 			expected: map[string]time.Duration{
-				"focus":      10 * time.Millisecond,
-				"restore":    10 * time.Millisecond,
-				"keyprocess": 75 * time.Millisecond,
+				"focus":      150 * time.Millisecond,
+				"restore":    100 * time.Millisecond,
+				"keyprocess": 150 * time.Millisecond,
 			},
 		},
 		{
@@ -430,7 +414,7 @@ func TestDelayMethods(t *testing.T) {
 			},
 			expected: map[string]time.Duration{
 				"focus":      30 * time.Millisecond,
-				"restore":    10 * time.Millisecond, // Default
+				"restore":    100 * time.Millisecond, // Default
 				"keyprocess": 200 * time.Millisecond,
 			},
 		},

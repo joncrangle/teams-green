@@ -14,7 +14,7 @@ Project style
 - Go 1.25.0, module "github.com/joncrangle/teams-green"; imports: stdlib/external/local; no relative imports
 - Formatting: always run go fmt; lines <120 chars; no emojis in code/logs (CLI messages ok)
 - Types: explicit types, zero-value-safe structs; avoid interface{}—use small interfaces
-- Errors: return errors, wrap with fmt.Errorf("context: %w", err); no panic in libs; use slog (config.InitLogger)
+- Errors: return errors, wrap with fmt.Errorf("context: %w", err); no panic in libs; use global slog
 - Log levels: Debug (loop details), Info (lifecycle), Warn (transient), Error (failures)
 - Concurrency: RWMutex for shared state; context for cancellation; time.Ticker over sleep loops
 - Naming: PascalCase (exported), camelCase (unexported); commands end Cmd; files snake_case; constants UPPER_SNAKE

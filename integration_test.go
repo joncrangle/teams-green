@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -87,26 +86,22 @@ func TestWebSocketServiceIntegration(t *testing.T) {
 	}
 
 	// Start websocket server
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	state := &websocket.ServiceState{
 		State:            "running",
 		PID:              os.Getpid(),
 		Clients:          make(map[*ws.Conn]bool),
 		Mutex:            sync.RWMutex{},
-		Logger:           logger,
 		LastActivity:     time.Now(),
 		TeamsWindowCount: 1,
 		FailureStreak:    0,
 	}
 
-	err = websocket.StartServer(cfg.Port, state)
+	server := websocket.NewServer(cfg.Port, state, cfg)
+	err = server.Start()
 	if err != nil {
 		t.Fatalf("failed to start websocket server: %v", err)
 	}
-	defer websocket.StopServer()
+	defer server.Stop()
 
 	// Test broadcasting events
 	event := &websocket.Event{
@@ -147,13 +142,7 @@ func TestConfigLogRotationIntegration(t *testing.T) {
 		t.Fatalf("log rotation config should be valid: %v", err)
 	}
 
-	// Initialize logger with rotation
-	logger := config.InitLogger(cfg)
-	if logger == nil {
-		t.Fatal("logger should not be nil")
-	}
-
-	// Create service with logging
+	// Create service (logging is initialized internally)
 	svc := service.NewService(cfg)
 	if svc == nil {
 		t.Fatal("service should not be nil")
