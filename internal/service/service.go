@@ -422,9 +422,8 @@ func (s *Service) performHealthCheck() {
 }
 
 func (s *Service) Run() error {
-	// Setup graceful shutdown with timeout
-	const shutdownTimeout = 10 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	// Setup cancellable context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Start WebSocket server if enabled
