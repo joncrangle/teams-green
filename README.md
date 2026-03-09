@@ -129,6 +129,7 @@ When WebSocket is enabled, connect to `ws://127.0.0.1:8765` to receive real-time
 #### Event Broadcasting
 
 The WebSocket server automatically broadcasts events to all connected clients when:
+
 - Service starts or stops
 - Service state changes
 - Key activity is performed (when debug logging is enabled)
@@ -139,22 +140,22 @@ Events are broadcast using an efficient buffer pool system for optimal memory us
 
 The service accepts the following flags:
 
-| Flag                  | Short | Default | Description                                       |
-|-----------------------|-------|---------|---------------------------------------------------|
-| `--debug`             | `-d`  | `false` | Run in foreground with debug logging              |
-| `--interval`          | `-i`  | `150`   | Activity interval in seconds (2.5 minutes)        |
-| `--websocket`         | `-w`  | `false` | Enable WebSocket server                           |
-| `--port`              | `-p`  | `8765`  | WebSocket server port                             |
-| `--focus-delay`       |       | `150`   | Delay after setting focus before sending key (ms) |
-| `--restore-delay`     |       | `100`   | Delay after restoring minimized window (ms)       |
-| `--key-process-delay` |       | `150`   | Delay before restoring original focus (ms)        |
-| `--input-threshold`   |       | `2000`  | Consider input active if within this time (ms)    |
+| Flag                  | Short | Default | Description                                                                |
+| --------------------- | ----- | ------- | -------------------------------------------------------------------------- |
+| `--debug`             | `-d`  | `false` | Run in foreground with debug logging                                       |
+| `--interval`          | `-i`  | `150`   | Activity interval in seconds (2.5 minutes)                                 |
+| `--websocket`         | `-w`  | `false` | Enable WebSocket server                                                    |
+| `--port`              | `-p`  | `8765`  | WebSocket server port                                                      |
+| `--focus-delay`       |       | `150`   | Delay after setting focus before sending key (ms)                          |
+| `--restore-delay`     |       | `100`   | Delay after restoring minimized window (ms)                                |
+| `--key-process-delay` |       | `150`   | Delay before restoring original focus (ms)                                 |
+| `--input-threshold`   |       | `2000`  | Consider input active if within this time (ms)                             |
 | `--activity-mode`     |       | `focus` | Activity mode: 'focus' (bring Teams forward) or 'global' (no focus change) |
-| `--log-format`        |       | `text`  | Log format: text or json                          |
-| `--log-file`          |       | ``      | Log file path (empty = no file logging)           |
-| `--log-rotate`        |       | `false` | Enable log rotation                               |
-| `--max-log-size`      |       | `10`    | Maximum log file size in MB                       |
-| `--max-log-age`       |       | `30`    | Maximum log file age in days                      |
+| `--log-format`        |       | `text`  | Log format: text or json                                                   |
+| `--log-file`          |       | ``      | Log file path (empty = no file logging)                                    |
+| `--log-rotate`        |       | `false` | Enable log rotation                                                        |
+| `--max-log-size`      |       | `10`    | Maximum log file size in MB                                                |
+| `--max-log-age`       |       | `30`    | Maximum log file age in days                                               |
 
 ### Activity Modes
 
@@ -166,6 +167,7 @@ Teams-Green supports two activity modes:
 Fallback: In focus mode, if focus cannot be set after retries, the service will still attempt to send the key so Teams may register activity. Switch to global mode if you prefer to skip all focus operations.
 
 Example:
+
 ```bash
 teams-green start --activity-mode global --interval 120
 ```
@@ -231,21 +233,25 @@ Teams-Green works by:
 ## Troubleshooting
 
 ### Service Won't Start
+
 - Check if Teams is running
 - Ensure no other instance is already running: `teams-green status`
 - Try running in debug mode: `teams-green start --debug`
 
 ### Teams Still Goes Idle
+
 - Reduce the interval: `teams-green start --interval 60`
 - Check Windows focus policies and permissions
 - Ensure Teams has proper window focus
 
 ### Teams Shows Pending Notifications After Key Send
+
 - **Most Common Issue**: Increase key processing delay: `teams-green start --key-process-delay 150`
 - Try conservative timing: `teams-green start --focus-delay 30 --key-process-delay 200`
 - Run in debug mode to monitor timing: `teams-green start --debug --key-process-delay 150`
 
 ### Keys Going to Wrong Applications
+
 - The service includes multiple safety checks to prevent this
 - Enhanced input detection now monitors all input types: keyboard, mouse (clicks AND movement), scroll wheel, and touch
 - Activity detection automatically resets the interval timer when any user input is detected
@@ -253,10 +259,12 @@ Teams-Green works by:
 - Run with debug logging to see protection mechanisms in action
 
 ### Performance Issues
+
 - Use faster timing for responsive systems: `teams-green start --focus-delay 10 --key-process-delay 75`
 - Increase delays for slower systems: `teams-green start --focus-delay 50 --key-process-delay 200`
 
 ### Activity Detection Behavior
+
 - **Mouse Activity**: Any mouse movement, clicking, dragging, or scroll wheel usage will reset the Teams activity timer
 - **Keyboard Activity**: Any key press will reset the timer
 - **Touch Input**: Touch screen interactions will reset the timer (on supported devices)
@@ -265,6 +273,7 @@ Teams-Green works by:
 - **Smart Timer Reset**: When activity is detected, the full interval timer is reset (e.g., if interval is 180s, timer resets to 180s from current time)
 
 ### WebSocket Connection Issues
+
 - **Security Restrictions**: WebSocket server only accepts localhost connections (127.0.0.1) with validated origins
 - **Connection Limits**: Maximum 50 concurrent connections - additional connections will be rejected
 - **Frequent Disconnections**: The WebSocket implementation includes keep-alive messages and extended timeouts to reduce disconnections
@@ -274,6 +283,7 @@ Teams-Green works by:
 - Check Windows Firewall settings
 
 ### Connection Health Monitoring
+
 - WebSocket connections support ping/pong for health checking
 - Clients can send `{"type": "ping"}` to test connection health
 - Server responds with `{"type": "pong"}` messages
@@ -283,6 +293,7 @@ Teams-Green works by:
 ### Fine-Tuning Timing
 
 **If Teams shows pending notifications:**
+
 ```bash
 # Start with conservative delays
 teams-green start --key-process-delay 200
@@ -292,12 +303,14 @@ teams-green start --key-process-delay 150
 ```
 
 **If Teams doesn't register the activity:**
+
 ```bash
 # Increase focus delay to ensure Teams processes the focus change
 teams-green start --focus-delay 50 --key-process-delay 150
 ```
 
 **For optimal performance:**
+
 ```bash
 # Test different combinations based on your system
 teams-green start --debug --focus-delay 25 --key-process-delay 125
@@ -310,4 +323,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Disclaimer
 
 Use this tool at your own risk. The author is not responsible for any misuse or damage caused by this software. Always ensure compliance with your organization's IT policies.
-
