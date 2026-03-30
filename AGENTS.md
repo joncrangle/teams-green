@@ -1,6 +1,5 @@
-AGENTS guide for teams-green
+## Build/lint/test
 
-Build/lint/test
 - Build: just build
 - Test all: just test (or go test ./...)
 - Test single package: go test ./internal/service (or go test -v ./internal/service for verbose)
@@ -10,8 +9,9 @@ Build/lint/test
 - Format: just fmt (golangci-lint fmt)
 - Fix lint issues: just fix
 
-Project style
-- Go 1.25.0, module "github.com/joncrangle/teams-green"; imports: stdlib/external/local; no relative imports
+## Project style
+
+- Module "github.com/joncrangle/teams-green"; imports: stdlib/external/local; no relative imports
 - Formatting: always run go fmt; lines <120 chars; no emojis in code/logs (CLI messages ok)
 - Types: explicit types, zero-value-safe structs; avoid interface{}—use small interfaces
 - Errors: return errors, wrap with fmt.Errorf("context: %w", err); no panic in libs; use global slog
@@ -24,7 +24,7 @@ Project style
 - WebSocket: golang.org/x/net/websocket; JSON Events; broadcast in internal/websocket; server timestamps
 - Testing: table-driven tests preferred; use testify/assert if needed; mock external dependencies
 
-AI/coding agents
-- No Cursor/Copilot files present; follow above rules
+## AI/coding agents
+
 - Before commit: just lint && just test
 - Add deps: go get module@version && go mod tidy
