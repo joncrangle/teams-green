@@ -200,6 +200,9 @@ func init() {
 		"teams.exe",
 		"msteams.exe",
 	}
+	for i := range teamsExecutables {
+		teamsExecutables[i] = strings.ToLower(teamsExecutables[i])
+	}
 }
 
 func enumWindowsProc(hwnd syscall.Handle, lParam uintptr) uintptr {
@@ -329,6 +332,44 @@ func (tm *TeamsManager) isWindowValid(hWnd win.HWND) bool {
 	}
 
 	return true
+}
+
+// isTeamsWindow checks if the given window handle belongs to a Teams process
+func (tm *TeamsManager) isTeamsWindow(hWnd win.HWND) bool {
+	if hWnd == 0 {
+		return false
+	}
+
+	var pid uint32
+	_, _, _ = procGetWindowThreadProcessID.Call(uintptr(hWnd), uintptr(unsafe.Pointer(&pid)))
+	if pid == 0 {
+		return false
+	}
+
+	hProcess, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil || hProcess == 0 {
+		return false
+	}
+	defer func() {
+		_ = windows.CloseHandle(hProcess)
+	}()
+
+	var exeName [windows.MAX_PATH]uint16
+	size := uint32(len(exeName))
+	if err := windows.QueryFullProcessImageName(hProcess, 0, &exeName[0], &size); err != nil {
+		return false
+	}
+
+	exePath := windows.UTF16ToString(exeName[:size])
+	lastSlash := strings.LastIndexByte(exePath, '\\')
+	var exeBase string
+	if lastSlash != -1 {
+		exeBase = strings.ToLower(exePath[lastSlash+1:])
+	} else {
+		exeBase = strings.ToLower(exePath)
+	}
+
+	return slices.Contains(teamsExecutables, exeBase)
 }
 
 // validateCachedWindows filters out invalid window handles from cache
@@ -1093,11 +1134,22 @@ func (tm *TeamsManager) SendKeysToTeams(ctx context.Context, state *websocket.Se
 	restoreDelay := tm.config.GetRestoreDelay()
 	keyProcessDelay := tm.config.GetKeyProcessDelay()
 
+	const vkF15 = 0x7E // F15 key
+
 	// Store the currently focused window to restore it later
 	currentWindow, _, _ := procGetForegroundWindow.Call()
 
+	// Check if a Teams window is already focused - if so, skip focus change
+	// This handles meetings naturally since the meeting window is already focused
+	if currentWindow != 0 && tm.isTeamsWindow(win.HWND(currentWindow)) {
+		slog.Debug("Teams window already focused, sending key directly without focus change")
+		if err := sendVirtualKey(uint16(vkF15)); err != nil {
+			return fmt.Errorf("key send failed: %w", err)
+		}
+		return nil
+	}
+
 	const (
-		vkF15            = 0x7E // F15 key
 		keyeventfKeydown = 0
 		keyeventfKeyup   = 2
 		swRestore        = 9
