@@ -30,7 +30,7 @@ var rootCmd = &cobra.Command{
 	Short: "Keep that Teams status green",
 	Long: `Teams-Green keeps your Microsoft Teams status active by sending 
 periodic keys to prevent the status from going idle.`,
-	Version: "0.5.4",
+	Version: "dev",
 }
 
 var versionCmd = &cobra.Command{
@@ -52,22 +52,7 @@ var startCmd = &cobra.Command{
 		if err := cfg.Validate(); err != nil {
 			return err
 		}
-
-		if cfg.Debug {
-			fmt.Println("🔧 Starting service in debug mode (foreground)")
-		}
-
-		if err := service.Start(cfg); err != nil {
-			return fmt.Errorf("❌ %w", err)
-		}
-
-		if !cfg.Debug {
-			if cfg.WebSocket {
-				fmt.Printf("🌐 WebSocket server available at: ws://127.0.0.1:%d\n", cfg.Port)
-			}
-			fmt.Println("✅ Service started successfully")
-		}
-		return nil
+		return startService()
 	},
 }
 
@@ -76,7 +61,7 @@ var stopCmd = &cobra.Command{
 	Short: "Stop Teams-Green process",
 	Long:  "Stop the running Teams-Green process",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		if err := service.Stop(); err != nil {
+		if err := service.Stop(cfg); err != nil {
 			return fmt.Errorf("❌ failed to stop service: %w", err)
 		}
 		return nil
@@ -88,7 +73,7 @@ var statusCmd = &cobra.Command{
 	Short: "Check the status of Teams-Green",
 	Long:  "Display the current status of Teams-Green with detailed activity information",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		running, pid, info, err := service.GetEnhancedStatus()
+		running, pid, info, err := service.GetEnhancedStatus(cfg)
 		if err != nil {
 			return fmt.Errorf("❌ failed to get service status: %w", err)
 		}
@@ -113,34 +98,19 @@ var toggleCmd = &cobra.Command{
 	Short: "Toggle Teams-Green",
 	Long:  "Start Teams-Green if it's not running, or stop it if it's currently running",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		running, _, _, err := service.GetEnhancedStatus()
+		running, _, _, err := service.GetEnhancedStatus(cfg)
 		if err != nil {
 			return fmt.Errorf("❌ failed to get service status: %w", err)
 		}
 
 		if running {
-			return service.Stop()
+			return service.Stop(cfg)
 		}
 
 		if err := cfg.Validate(); err != nil {
 			return err
 		}
-
-		if cfg.Debug {
-			fmt.Println("🔧 Starting Teams-Green in debug mode (foreground)")
-		}
-
-		if err := service.Start(cfg); err != nil {
-			return fmt.Errorf("❌ failed to start service: %w", err)
-		}
-
-		if !cfg.Debug {
-			if cfg.WebSocket {
-				fmt.Printf("🌐 WebSocket server available at: ws://127.0.0.1:%d\n", cfg.Port)
-			}
-			fmt.Println("✅ Teams-Green started successfully")
-		}
-		return nil
+		return startService()
 	},
 }
 
@@ -195,6 +165,29 @@ func init() {
 	rootCmd.AddCommand(toggleCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(runCmd)
+}
+
+func startService() error {
+	if cfg.Debug {
+		fmt.Println("🔧 Starting service in debug mode (foreground)")
+	}
+
+	if err := service.Start(cfg); err != nil {
+		return fmt.Errorf("❌ %w", err)
+	}
+
+	if !cfg.Debug {
+		if cfg.WebSocket {
+			fmt.Printf("🌐 WebSocket server available at: ws://127.0.0.1:%d\n", cfg.Port)
+		}
+		fmt.Println("✅ Service started successfully")
+	}
+	return nil
+}
+
+// SetVersion sets the version string displayed by the CLI.
+func SetVersion(v string) {
+	rootCmd.Version = v
 }
 
 // Execute runs the root command and handles any errors by exiting with code 1.

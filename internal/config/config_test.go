@@ -333,12 +333,14 @@ func TestCheckPortAvailable(t *testing.T) {
 }
 
 func TestPidFileInitialization(t *testing.T) {
-	if PidFile == "" {
+	cfg := &Config{}
+	pidFile := cfg.PidFile()
+	if pidFile == "" {
 		t.Errorf("PidFile should be initialized")
 	}
 
-	if filepath.Base(PidFile) != "teams-green.pid" {
-		t.Errorf("PidFile should end with teams-green.pid, got %s", PidFile)
+	if filepath.Base(pidFile) != "teams-green.pid" {
+		t.Errorf("PidFile should end with teams-green.pid, got %s", pidFile)
 	}
 }
 

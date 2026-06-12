@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/joncrangle/teams-green/internal/config"
 	"golang.org/x/net/websocket"
 	"golang.org/x/time/rate"
 )
@@ -33,16 +34,11 @@ const (
 	rateBurstSize     = 20
 )
 
-var (
-	activeConnections int32 // Atomic counter for active connections
-
-	// Rate limiter for WebSocket message processing
-	limiter = rate.NewLimiter(rate.Limit(messagesPerSecond), rateBurstSize)
-)
+var activeConnections int32 // Atomic counter for active connections
 
 // HandleConnection manages a WebSocket client connection with proper lifecycle management,
 // connection limits, keep-alive handling, and message processing.
-func HandleConnection(ws *websocket.Conn, state *ServiceState, config ConfigProvider) {
+func HandleConnection(ws *websocket.Conn, state *ServiceState, config config.ConfigProvider) {
 	// Check and enforce connection limits
 	if !checkConnectionLimit(ws, state) {
 		return
@@ -78,8 +74,15 @@ func checkConnectionLimit(ws *websocket.Conn, _ *ServiceState) bool {
 	}
 }
 
+func getRemoteAddr(ws *websocket.Conn) string {
+	if ws != nil && ws.Request() != nil {
+		return ws.Request().RemoteAddr
+	}
+	return "unknown"
+}
+
 // setupClientConnection registers the client and sends the current service state.
-func setupClientConnection(ws *websocket.Conn, state *ServiceState, config ConfigProvider) {
+func setupClientConnection(ws *websocket.Conn, state *ServiceState, config config.ConfigProvider) {
 	// Register client
 	state.Mutex.Lock()
 	state.Clients[ws] = true
@@ -87,7 +90,7 @@ func setupClientConnection(ws *websocket.Conn, state *ServiceState, config Confi
 	state.Mutex.Unlock()
 
 	slog.Info("WebSocket client connected",
-		slog.String("remote_addr", ws.Request().RemoteAddr),
+		slog.String("remote_addr", getRemoteAddr(ws)),
 		slog.Int("total_clients", clientCount),
 		slog.Int("active_connections", int(atomic.LoadInt32(&activeConnections))))
 
@@ -96,7 +99,8 @@ func setupClientConnection(ws *websocket.Conn, state *ServiceState, config Confi
 }
 
 // sendInitialState sends the current service status to a newly connected client.
-func sendInitialState(ws *websocket.Conn, state *ServiceState, config ConfigProvider) {
+func sendInitialState(ws *websocket.Conn, state *ServiceState, config config.ConfigProvider) {
+	state.Mutex.RLock()
 	currentEvent := Event{
 		Service:   "teams-green",
 		Status:    state.State,
@@ -104,6 +108,7 @@ func sendInitialState(ws *websocket.Conn, state *ServiceState, config ConfigProv
 		Type:      "status",
 		Timestamp: time.Now(),
 	}
+	state.Mutex.RUnlock()
 	if msg, err := json.Marshal(currentEvent); err == nil {
 		_ = sendMessageWithTimeout(ws, string(msg), config.GetWebSocketWriteTimeout())
 	}
@@ -120,13 +125,14 @@ func cleanupClientConnection(ws *websocket.Conn, state *ServiceState) {
 
 	ws.Close()
 	slog.Info("WebSocket client disconnected",
-		slog.String("remote_addr", ws.Request().RemoteAddr),
+		slog.String("remote_addr", getRemoteAddr(ws)),
 		slog.Int("remaining_clients", remainingClients),
 		slog.Int("active_connections", int(atomic.LoadInt32(&activeConnections))))
 }
 
 // handleClientMessages processes incoming WebSocket messages in a loop.
-func handleClientMessages(ws *websocket.Conn, state *ServiceState, config ConfigProvider) {
+func handleClientMessages(ws *websocket.Conn, state *ServiceState, config config.ConfigProvider) {
+	connLimiter := rate.NewLimiter(rate.Limit(messagesPerSecond), rateBurstSize)
 	for {
 		if err := ws.SetReadDeadline(time.Now().Add(config.GetWebSocketReadTimeout())); err != nil {
 			slog.Debug("Failed to set read deadline", slog.String("error", err.Error()))
@@ -151,7 +157,7 @@ func handleClientMessages(ws *websocket.Conn, state *ServiceState, config Config
 		}
 
 		// Rate limit check before processing
-		if !limiter.Allow() {
+		if !connLimiter.Allow() {
 			slog.Debug("Rate limit exceeded, dropping message",
 				slog.String("remote_addr", ws.Request().RemoteAddr))
 			continue
@@ -191,19 +197,20 @@ func sendMessageWithTimeout(ws *websocket.Conn, msg string, timeout time.Duratio
 }
 
 // handleMessage processes incoming WebSocket messages.
-func handleMessage(ws *websocket.Conn, msg string, state *ServiceState, config ConfigProvider) error {
+func handleMessage(ws *websocket.Conn, msg string, state *ServiceState, config config.ConfigProvider) error {
 	// Try to parse as JSON event
 	var event Event
 	if err := json.Unmarshal([]byte(msg), &event); err != nil {
 		// Log malformed JSON at debug level for troubleshooting
 		slog.Debug("Malformed WebSocket message",
 			slog.String("error", err.Error()),
-			slog.String("remote_addr", ws.Request().RemoteAddr))
+			slog.String("remote_addr", getRemoteAddr(ws)))
 		return nil
 	}
 
 	// Handle ping messages by sending a pong response (for client compatibility)
 	if event.Type == "ping" {
+		state.Mutex.RLock()
 		pongEvent := Event{
 			Service:   "teams-green",
 			Status:    state.State,
@@ -212,6 +219,7 @@ func handleMessage(ws *websocket.Conn, msg string, state *ServiceState, config C
 			Type:      "pong",
 			Timestamp: time.Now(),
 		}
+		state.Mutex.RUnlock()
 		if pongMsg, err := json.Marshal(pongEvent); err == nil {
 			return sendMessageWithTimeout(ws, string(pongMsg), config.GetWebSocketWriteTimeout())
 		}

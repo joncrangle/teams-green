@@ -7,15 +7,18 @@ import (
 	"github.com/lxn/win"
 )
 
-// mockConfig implements ConfigProvider with minimal methods used in tests.
+// mockConfig implements config.ConfigProvider with minimal methods used in tests.
 type mockConfig struct{}
 
-func (m *mockConfig) GetFocusDelay() time.Duration      { return 0 }
-func (m *mockConfig) GetRestoreDelay() time.Duration    { return 0 }
-func (m *mockConfig) GetKeyProcessDelay() time.Duration { return 0 }
-func (m *mockConfig) GetInputThreshold() time.Duration  { return 500 * time.Millisecond }
-func (m *mockConfig) IsDebugEnabled() bool              { return false }
-func (m *mockConfig) GetActivityMode() string           { return "" }
+func (m *mockConfig) GetFocusDelay() time.Duration            { return 0 }
+func (m *mockConfig) GetRestoreDelay() time.Duration          { return 0 }
+func (m *mockConfig) GetKeyProcessDelay() time.Duration       { return 0 }
+func (m *mockConfig) GetInputThreshold() time.Duration        { return 500 * time.Millisecond }
+func (m *mockConfig) IsDebugEnabled() bool                    { return false }
+func (m *mockConfig) GetActivityMode() string                 { return "" }
+func (m *mockConfig) GetWebSocketReadTimeout() time.Duration  { return 0 }
+func (m *mockConfig) GetWebSocketWriteTimeout() time.Duration { return 0 }
+func (m *mockConfig) GetWebSocketIdleTimeout() time.Duration  { return 0 }
 
 func newTestTeamsManager(nowFn func() time.Time) *TeamsManager {
 	return &TeamsManager{

@@ -43,6 +43,7 @@ type Service struct {
 	panicRestarts      []time.Time
 	panicMutex         sync.Mutex
 	mainLoopWG         sync.WaitGroup // Tracks main loop goroutine lifecycle
+	inputDetector      InputDetector
 }
 
 // updateActivityState atomically updates service scheduling timestamps and shared state following
@@ -130,6 +131,7 @@ func NewService(cfg *config.Config) *Service {
 		nextTeamsActivity: now.Add(time.Duration(cfg.Interval) * time.Second),
 		panicRestarts:     make([]time.Time, 0, maxPanicRestarts),
 		mainLoopWG:        sync.WaitGroup{},
+		inputDetector:     NewInputDetectorWithThreshold(cfg.GetInputThreshold()),
 	}
 }
 
@@ -277,12 +279,8 @@ func (s *Service) handleHealthCheck(now time.Time, lastHealthCheck *time.Time) {
 }
 
 func (s *Service) handleUserActivity() bool {
-	// Create input detector with configured threshold
-	inputThreshold := s.config.GetInputThreshold()
-	inputDetector := NewInputDetectorWithThreshold(inputThreshold)
-
 	// Check for active input - detects keyboard, mouse, touch
-	if inputDetector.IsUserInputActive() {
+	if s.inputDetector.IsUserInputActive() {
 		now := time.Now()
 		s.activityCheckMutex.Lock()
 		s.lastUserActivity = now
@@ -317,11 +315,12 @@ func (s *Service) handleTeamsActivity(ctx context.Context, teamsMissingCount *in
 		// Success - update activity tracking and advance next scheduled activity
 		activityTime := time.Now()
 		// If there was a failure streak, log and broadcast before resetting to preserve prior value
-		if func() int { s.state.Mutex.RLock(); defer s.state.Mutex.RUnlock(); return s.state.FailureStreak }() > 0 {
-			s.state.Mutex.RLock()
-			prevStreak := s.state.FailureStreak
-			windowCount := s.state.TeamsWindowCount
-			s.state.Mutex.RUnlock()
+		s.state.Mutex.RLock()
+		prevStreak := s.state.FailureStreak
+		windowCount := s.state.TeamsWindowCount
+		pid := s.state.PID
+		s.state.Mutex.RUnlock()
+		if prevStreak > 0 {
 			slog.Info("Teams activity resumed",
 				slog.Int("was_failure_streak", prevStreak),
 				slog.Int("teams_windows", windowCount))
@@ -329,7 +328,7 @@ func (s *Service) handleTeamsActivity(ctx context.Context, teamsMissingCount *in
 				websocket.Broadcast(&websocket.Event{
 					Service: "teams-green",
 					Status:  "running",
-					PID:     s.state.PID,
+					PID:     pid,
 					Message: fmt.Sprintf("Teams activity resumed (found %d windows)", windowCount),
 				}, s.state)
 			}
@@ -362,8 +361,11 @@ func (s *Service) handleFailure(ctx context.Context, err error, teamsMissingCoun
 	}
 
 	// Implement exponential backoff for excessive failures, but respect context
-	if s.state.FailureStreak > failureBackoffStart {
-		backoffDuration := time.Duration(min(s.state.FailureStreak*2, maxBackoffSeconds)) * time.Second
+	s.state.Mutex.RLock()
+	streak := s.state.FailureStreak
+	s.state.Mutex.RUnlock()
+	if streak > failureBackoffStart {
+		backoffDuration := time.Duration(min(streak*2, maxBackoffSeconds)) * time.Second
 		slog.Info("Applying failure backoff", slog.Duration("duration", backoffDuration))
 
 		// Use context-aware sleep

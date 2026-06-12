@@ -163,13 +163,16 @@ func TestConfigLogRotationIntegration(t *testing.T) {
 
 func TestPIDFileIntegration(t *testing.T) {
 	// Test PID file operations integration
+	cfg := &config.Config{
+		PidFilePath: filepath.Join(t.TempDir(), "teams-green.pid"),
+	}
 
 	// Ensure clean state - remove any existing PID file and wait for filesystem
-	os.Remove(config.PidFile)
+	os.Remove(cfg.PidFile())
 	time.Sleep(10 * time.Millisecond) // Give Windows filesystem time to process the removal
 
 	// Test status when no service running
-	running, pid, info, err := service.GetEnhancedStatus()
+	running, pid, info, err := service.GetEnhancedStatus(cfg)
 	if err != nil {
 		// Allow for cleaned up invalid PID files as this is expected behavior
 		if !strings.Contains(err.Error(), "invalid PID file (cleaned up)") {
@@ -238,13 +241,16 @@ func TestServiceStartStopIntegration(t *testing.T) {
 func TestMultipleServiceInstancesPrevention(t *testing.T) {
 	// Test that multiple service instances cannot be created simultaneously
 	// by testing the PID file locking mechanism
+	cfg := &config.Config{
+		PidFilePath: filepath.Join(t.TempDir(), "teams-green.pid"),
+	}
 
 	// Clean up any existing PID file and wait for filesystem
-	os.Remove(config.PidFile)
+	os.Remove(cfg.PidFile())
 	time.Sleep(10 * time.Millisecond) // Give Windows filesystem time to process the removal
 
 	// First instance check - should succeed
-	running, _, _, err := service.GetEnhancedStatus()
+	running, _, _, err := service.GetEnhancedStatus(cfg)
 	if err != nil {
 		// Allow for cleaned up stale/invalid PID files as this is expected behavior
 		if !strings.Contains(err.Error(), "stale PID file found but failed to cleanup") &&

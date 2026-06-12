@@ -29,12 +29,15 @@ func TestIsProcessRunning(t *testing.T) {
 }
 
 func TestGetEnhancedStatusNoService(t *testing.T) {
+	cfg := &config.Config{
+		PidFilePath: filepath.Join(t.TempDir(), "teams-green.pid"),
+	}
 	// Ensure no PID file exists for this test
-	if _, err := os.Stat(config.PidFile); !os.IsNotExist(err) {
-		os.Remove(config.PidFile)
+	if _, err := os.Stat(cfg.PidFile()); !os.IsNotExist(err) {
+		os.Remove(cfg.PidFile())
 	}
 
-	running, pid, info, err := GetEnhancedStatus()
+	running, pid, info, err := GetEnhancedStatus(cfg)
 	if err != nil {
 		t.Errorf("should not error when service is not running: %v", err)
 	}
@@ -53,15 +56,18 @@ func TestGetEnhancedStatusNoService(t *testing.T) {
 }
 
 func TestGetEnhancedStatusInvalidPIDFile(t *testing.T) {
+	cfg := &config.Config{
+		PidFilePath: filepath.Join(t.TempDir(), "teams-green.pid"),
+	}
 	// Create invalid PID file
 	invalidContent := "not-a-number"
-	err := os.WriteFile(config.PidFile, []byte(invalidContent), 0o644)
+	err := os.WriteFile(cfg.PidFile(), []byte(invalidContent), 0o644)
 	if err != nil {
 		t.Fatalf("failed to create invalid PID file: %v", err)
 	}
-	defer os.Remove(config.PidFile)
+	defer os.Remove(cfg.PidFile())
 
-	running, pid, info, err := GetEnhancedStatus()
+	running, pid, info, err := GetEnhancedStatus(cfg)
 	if err == nil {
 		t.Error("should error with invalid PID file")
 	}
@@ -80,15 +86,18 @@ func TestGetEnhancedStatusInvalidPIDFile(t *testing.T) {
 }
 
 func TestGetEnhancedStatusStalePID(t *testing.T) {
+	cfg := &config.Config{
+		PidFilePath: filepath.Join(t.TempDir(), "teams-green.pid"),
+	}
 	// Create PID file with non-existent process
 	stalePID := "99999"
-	err := os.WriteFile(config.PidFile, []byte(stalePID), 0o644)
+	err := os.WriteFile(cfg.PidFile(), []byte(stalePID), 0o644)
 	if err != nil {
 		t.Fatalf("failed to create stale PID file: %v", err)
 	}
-	defer os.Remove(config.PidFile)
+	defer os.Remove(cfg.PidFile())
 
-	running, pid, info, err := GetEnhancedStatus()
+	running, pid, info, err := GetEnhancedStatus(cfg)
 	if err != nil {
 		t.Errorf("should not error with stale PID file: %v", err)
 	}
@@ -106,24 +115,24 @@ func TestGetEnhancedStatusStalePID(t *testing.T) {
 	}
 
 	// PID file should be cleaned up
-	if _, err := os.Stat(config.PidFile); !os.IsNotExist(err) {
+	if _, err := os.Stat(cfg.PidFile()); !os.IsNotExist(err) {
 		t.Error("stale PID file should have been cleaned up")
 	}
 }
 
 func TestStartServiceAlreadyRunning(t *testing.T) {
+	cfg := &config.Config{
+		Debug:       false,
+		Interval:    180,
+		PidFilePath: filepath.Join(t.TempDir(), "teams-green.pid"),
+	}
 	// Create PID file with current process
 	currentPID := strconv.Itoa(os.Getpid())
-	err := os.WriteFile(config.PidFile, []byte(currentPID), 0o644)
+	err := os.WriteFile(cfg.PidFile(), []byte(currentPID), 0o644)
 	if err != nil {
 		t.Fatalf("failed to create PID file: %v", err)
 	}
-	defer os.Remove(config.PidFile)
-
-	cfg := &config.Config{
-		Debug:    false,
-		Interval: 180,
-	}
+	defer os.Remove(cfg.PidFile())
 
 	err = Start(cfg)
 	if err == nil {
@@ -136,13 +145,13 @@ func TestStartServiceAlreadyRunning(t *testing.T) {
 }
 
 func TestStartServiceDebugMode(t *testing.T) {
-	// Ensure no PID file exists
-	os.Remove(config.PidFile)
-
 	cfg := &config.Config{
-		Debug:    true,
-		Interval: 10,
+		Debug:       true,
+		Interval:    10,
+		PidFilePath: filepath.Join(t.TempDir(), "teams-green.pid"),
 	}
+	// Ensure no PID file exists
+	os.Remove(cfg.PidFile())
 
 	// Create a mock executable that exits quickly
 	tempExe := filepath.Join(t.TempDir(), "test.exe")
@@ -170,10 +179,13 @@ func TestStartServiceDebugMode(t *testing.T) {
 }
 
 func TestStopServiceNotRunning(t *testing.T) {
+	cfg := &config.Config{
+		PidFilePath: filepath.Join(t.TempDir(), "teams-green.pid"),
+	}
 	// Ensure no PID file exists
-	os.Remove(config.PidFile)
+	os.Remove(cfg.PidFile())
 
-	err := Stop()
+	err := Stop(cfg)
 	if err == nil {
 		t.Error("should error when trying to stop non-running service")
 	}
@@ -184,39 +196,45 @@ func TestStopServiceNotRunning(t *testing.T) {
 }
 
 func TestStopServiceInvalidPIDFile(t *testing.T) {
+	cfg := &config.Config{
+		PidFilePath: filepath.Join(t.TempDir(), "teams-green.pid"),
+	}
 	// Create invalid PID file
 	invalidContent := "not-a-number"
-	err := os.WriteFile(config.PidFile, []byte(invalidContent), 0o644)
+	err := os.WriteFile(cfg.PidFile(), []byte(invalidContent), 0o644)
 	if err != nil {
 		t.Fatalf("failed to create invalid PID file: %v", err)
 	}
 
-	err = Stop()
+	err = Stop(cfg)
 	if err == nil {
 		t.Error("should error with invalid PID file")
 	}
 
 	// PID file should be cleaned up
-	if _, err := os.Stat(config.PidFile); !os.IsNotExist(err) {
+	if _, err := os.Stat(cfg.PidFile()); !os.IsNotExist(err) {
 		t.Error("invalid PID file should have been cleaned up")
 	}
 }
 
 func TestStopServiceNotRunningProcess(t *testing.T) {
+	cfg := &config.Config{
+		PidFilePath: filepath.Join(t.TempDir(), "teams-green.pid"),
+	}
 	// Create PID file with non-existent process
 	stalePID := "99999"
-	err := os.WriteFile(config.PidFile, []byte(stalePID), 0o644)
+	err := os.WriteFile(cfg.PidFile(), []byte(stalePID), 0o644)
 	if err != nil {
 		t.Fatalf("failed to create PID file: %v", err)
 	}
 
-	err = Stop()
+	err = Stop(cfg)
 	if err == nil {
 		t.Error("should error when process is not running")
 	}
 
 	// PID file should be cleaned up
-	if _, err := os.Stat(config.PidFile); !os.IsNotExist(err) {
+	if _, err := os.Stat(cfg.PidFile()); !os.IsNotExist(err) {
 		t.Error("stale PID file should have been cleaned up")
 	}
 }
@@ -237,17 +255,20 @@ func TestStatusInfo(t *testing.T) {
 }
 
 func TestWritePidFileAtomic(t *testing.T) {
+	cfg := &config.Config{
+		PidFilePath: filepath.Join(t.TempDir(), "teams-green.pid"),
+	}
 	// Ensure clean state
-	_ = os.Remove(config.PidFile)
+	_ = os.Remove(cfg.PidFile())
 
 	firstPID := os.Getpid()
-	if err := writePidFile(firstPID); err != nil {
+	if err := writePidFile(cfg, firstPID); err != nil {
 		t.Fatalf("first writePidFile failed: %v", err)
 	}
-	defer os.Remove(config.PidFile)
+	defer os.Remove(cfg.PidFile())
 
 	secondPID := firstPID + 1
-	err := writePidFile(secondPID)
+	err := writePidFile(cfg, secondPID)
 	if err == nil {
 		t.Fatal("expected error on second writePidFile call for existing pid file")
 	}
@@ -255,7 +276,7 @@ func TestWritePidFileAtomic(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	content, readErr := os.ReadFile(config.PidFile)
+	content, readErr := os.ReadFile(cfg.PidFile())
 	if readErr != nil {
 		t.Fatalf("failed to read pid file: %v", readErr)
 	}

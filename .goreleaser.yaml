@@ -18,7 +18,7 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
     binary: teams-green
 
 archives:
@@ -36,7 +36,6 @@ archives:
     files:
       - README.md
       - LICENSE
-      - AGENTS.md
 
 changelog:
   sort: asc

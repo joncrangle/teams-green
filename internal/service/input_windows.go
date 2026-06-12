@@ -5,14 +5,17 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
+
+// procSendInput uses windows.NewLazySystemDLL to avoid DLL search-order hijacking.
+// Defined at package level so the DLL handle is resolved once and reused.
+var procSendInput = windows.NewLazySystemDLL("user32.dll").NewProc("SendInput")
 
 // sendVirtualKey uses the Windows SendInput API to synthesize a key press/release pair for the
 // specified virtual key code. This is a replacement for the legacy keybd_event usage.
 func sendVirtualKey(vk uint16) error {
-	user32 := syscall.NewLazyDLL("user32.dll")
-	procSendInput := user32.NewProc("SendInput")
-
 	type keyboardInput struct {
 		Type      uint32
 		_         [4]byte // padding to align to 8-byte boundary like C INPUT union

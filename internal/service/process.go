@@ -5,12 +5,10 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/joncrangle/teams-green/internal/config"
 
@@ -46,7 +44,7 @@ func IsProcessRunning(pid int) bool {
 // Start launches the teams-green service in the background or foreground based on configuration.
 func Start(cfg *config.Config) error {
 	// Check if service is already running
-	if err := checkServiceAlreadyRunning(); err != nil {
+	if err := checkServiceAlreadyRunning(cfg); err != nil {
 		return err
 	}
 
@@ -61,12 +59,12 @@ func Start(cfg *config.Config) error {
 		return startInForeground(exe, args)
 	}
 
-	return startInBackground(exe, args)
+	return startInBackground(exe, args, cfg)
 }
 
 // checkServiceAlreadyRunning checks if the service is already running and handles stale PID files.
-func checkServiceAlreadyRunning() error {
-	pidBytes, err := os.ReadFile(config.PidFile)
+func checkServiceAlreadyRunning(cfg *config.Config) error {
+	pidBytes, err := os.ReadFile(cfg.PidFile())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // No PID file, service not running
@@ -77,7 +75,7 @@ func checkServiceAlreadyRunning() error {
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 	if err != nil {
 		// Invalid PID file, clean it up
-		os.Remove(config.PidFile)
+		os.Remove(cfg.PidFile())
 		return nil
 	}
 
@@ -86,7 +84,7 @@ func checkServiceAlreadyRunning() error {
 	}
 
 	// Clean up stale PID file
-	os.Remove(config.PidFile)
+	os.Remove(cfg.PidFile())
 	return nil
 }
 
@@ -120,7 +118,7 @@ func startInForeground(exe string, args []string) error {
 }
 
 // startInBackground runs the service in the background with proper Windows attributes.
-func startInBackground(exe string, args []string) error {
+func startInBackground(exe string, args []string, cfg *config.Config) error {
 	cmd := exec.Command(exe, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
@@ -131,7 +129,7 @@ func startInBackground(exe string, args []string) error {
 		return fmt.Errorf("failed to start service: %w", err)
 	}
 
-	if err := writePidFile(cmd.Process.Pid); err != nil {
+	if err := writePidFile(cfg, cmd.Process.Pid); err != nil {
 		// Attempt to kill the process before returning error
 		if killErr := cmd.Process.Kill(); killErr != nil {
 			time.Sleep(100 * time.Millisecond)
@@ -156,10 +154,10 @@ func startInBackground(exe string, args []string) error {
 // It fails if the pid file already exists to avoid races where two instances
 // start nearly simultaneously. If a stale pid file exists pointing to a dead
 // process, the caller should have removed it prior to calling this function.
-func writePidFile(pid int) error {
+func writePidFile(cfg *config.Config, pid int) error {
 	pidContent := fmt.Sprintf("%d", pid)
 	// Use O_CREATE|O_EXCL for atomic creation; O_WRONLY to write.
-	f, err := os.OpenFile(config.PidFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, pidFilePermissions)
+	f, err := os.OpenFile(cfg.PidFile(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, pidFilePermissions)
 	if err != nil {
 		if os.IsExist(err) {
 			return fmt.Errorf("❌ pid file already exists: %w", err)
@@ -178,8 +176,8 @@ func writePidFile(pid int) error {
 }
 
 // Stop terminates the running teams-green service process.
-func Stop() error {
-	pidBytes, err := os.ReadFile(config.PidFile)
+func Stop(cfg *config.Config) error {
+	pidBytes, err := os.ReadFile(cfg.PidFile())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("❌ service not running (no PID file found)")
@@ -189,23 +187,23 @@ func Stop() error {
 
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 	if err != nil {
-		return cleanupPidFileWithError(fmt.Errorf("invalid PID file: %w", err))
+		return cleanupPidFileWithError(cfg, fmt.Errorf("invalid PID file: %w", err))
 	}
 
 	if !IsProcessRunning(pid) {
-		return cleanupPidFileWithError(fmt.Errorf("process not running"))
+		return cleanupPidFileWithError(cfg, fmt.Errorf("process not running"))
 	}
 
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return cleanupPidFileWithError(fmt.Errorf("process not found: %w", err))
+		return cleanupPidFileWithError(cfg, fmt.Errorf("process not found: %w", err))
 	}
 
 	if err := proc.Kill(); err != nil {
 		return fmt.Errorf("❌ failed to stop process (PID %d): %w", pid, err)
 	}
 
-	if err := os.Remove(config.PidFile); err != nil {
+	if err := os.Remove(cfg.PidFile()); err != nil {
 		slog.Warn("Service stopped but failed to cleanup PID file", "pid", pid, "error", err)
 	} else {
 		slog.Info("Service stopped", "pid", pid)
@@ -213,16 +211,16 @@ func Stop() error {
 	return nil
 }
 
-func cleanupPidFileWithError(err error) error {
-	if removeErr := os.Remove(config.PidFile); removeErr != nil {
+func cleanupPidFileWithError(cfg *config.Config, err error) error {
+	if removeErr := os.Remove(cfg.PidFile()); removeErr != nil {
 		return fmt.Errorf("❌ %w (cleanup failed: %w)", err, removeErr)
 	}
 	return err
 }
 
 // GetEnhancedStatus checks if the service is running and returns detailed status information.
-func GetEnhancedStatus() (bool, int, *StatusInfo, error) {
-	pidBytes, err := os.ReadFile(config.PidFile)
+func GetEnhancedStatus(cfg *config.Config) (bool, int, *StatusInfo, error) {
+	pidBytes, err := os.ReadFile(cfg.PidFile())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, 0, nil, nil // Not running, no error
@@ -232,7 +230,7 @@ func GetEnhancedStatus() (bool, int, *StatusInfo, error) {
 
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 	if err != nil {
-		if removeErr := os.Remove(config.PidFile); removeErr != nil {
+		if removeErr := os.Remove(cfg.PidFile()); removeErr != nil {
 			return false, 0, nil, fmt.Errorf("invalid PID file (%w) and failed to cleanup (%w)", err, removeErr)
 		}
 		return false, 0, nil, fmt.Errorf("invalid PID file (cleaned up): %w", err)
@@ -250,7 +248,7 @@ func GetEnhancedStatus() (bool, int, *StatusInfo, error) {
 	}
 
 	// Process not running, clean up stale PID file
-	if removeErr := os.Remove(config.PidFile); removeErr != nil {
+	if removeErr := os.Remove(cfg.PidFile()); removeErr != nil {
 		return false, pid, nil, fmt.Errorf("stale PID file found but failed to cleanup: %w", removeErr)
 	}
 	return false, pid, nil, nil // Stale PID cleaned up
@@ -263,62 +261,6 @@ type StatusInfo struct {
 }
 
 // getTeamsWindowCountForStatus detects Teams windows for status reporting.
-// This uses the same logic as the main service's Teams detection but simplified for external use.
 func getTeamsWindowCountForStatus() int {
-	var windowCount int
-
-	// Use the same window enumeration approach as the main service
-	enumCallback := func(hwnd syscall.Handle, _ uintptr) uintptr {
-		// Skip invisible windows
-		ret, _, _ := procIsWindowVisible.Call(uintptr(hwnd))
-		if ret == 0 {
-			return 1
-		}
-
-		var pid uint32
-		_, _, _ = procGetWindowThreadProcessID.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&pid)))
-		if pid == 0 {
-			return 1
-		}
-
-		// Get process executable name
-		hProcess, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-		if err != nil || hProcess == 0 {
-			return 1
-		}
-		defer func() {
-			_ = windows.CloseHandle(hProcess)
-		}()
-
-		var exeName [windows.MAX_PATH]uint16
-		size := uint32(len(exeName))
-		if err := windows.QueryFullProcessImageName(hProcess, 0, &exeName[0], &size); err != nil {
-			return 1
-		}
-
-		// Extract base executable name (same logic as teams.go)
-		exePath := windows.UTF16ToString(exeName[:size])
-		lastSlash := strings.LastIndexByte(exePath, '\\')
-		var exeBase string
-		if lastSlash != -1 {
-			exeBase = strings.ToLower(exePath[lastSlash+1:])
-		} else {
-			exeBase = strings.ToLower(exePath)
-		}
-
-		// Check if this is a Teams executable
-		if slices.Contains(teamsExecutables, exeBase) {
-			windowCount++
-		}
-
-		return 1
-	}
-
-	// Enumerate all windows
-	_, _, _ = procEnumWindows.Call(
-		syscall.NewCallback(enumCallback),
-		0,
-	)
-
-	return windowCount
+	return len(EnumerateTeamsWindows())
 }

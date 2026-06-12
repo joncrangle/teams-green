@@ -7,14 +7,14 @@ build:
 test:
     go test -v ./...
 
-run: build
-    ./dist/teams-green.exe start
+run *args: build
+    ./dist/teams-green.exe start {{args}}
 
-run-ws: build
-    ./dist/teams-green.exe start --websocket
+run-ws *args: build
+    ./dist/teams-green.exe start --websocket {{args}}
 
-debug: build
-    ./dist/teams-green.exe start --websocket --debug
+debug *args: build
+    ./dist/teams-green.exe start --websocket --debug {{args}}
 
 clean:
     rm -rf dist/

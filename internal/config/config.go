@@ -15,6 +15,21 @@ import (
 	"time"
 )
 
+// ConfigProvider defines the interface for accessing configuration values.
+//
+//nolint:revive // config.ConfigProvider stutters but matches interface style requested by user
+type ConfigProvider interface {
+	GetFocusDelay() time.Duration
+	GetRestoreDelay() time.Duration
+	GetKeyProcessDelay() time.Duration
+	GetInputThreshold() time.Duration
+	IsDebugEnabled() bool
+	GetActivityMode() string
+	GetWebSocketReadTimeout() time.Duration
+	GetWebSocketWriteTimeout() time.Duration
+	GetWebSocketIdleTimeout() time.Duration
+}
+
 type Config struct {
 	Debug      bool
 	Interval   int
@@ -41,6 +56,9 @@ type Config struct {
 	WebSocketReadTimeout  int // Read timeout (default: 60)
 	WebSocketWriteTimeout int // Write timeout (default: 60)
 	WebSocketIdleTimeout  int // Idle timeout (default: 300)
+
+	// PidFilePath overrides the default PID file path (useful for tests)
+	PidFilePath string
 }
 
 // GetFocusDelay returns the focus delay as a time.Duration with fallback to default
@@ -113,7 +131,27 @@ func (cfg *Config) GetActivityMode() string {
 	return mode
 }
 
-var PidFile string
+// PidFile returns the path to the PID file.
+func (cfg *Config) PidFile() string {
+	if cfg.PidFilePath != "" {
+		return cfg.PidFilePath
+	}
+	appDataDir := os.Getenv("LOCALAPPDATA")
+	if appDataDir == "" {
+		if tmpDir := os.Getenv("TEMP"); tmpDir != "" {
+			return filepath.Join(tmpDir, "teams-green.pid")
+		}
+		return "teams-green.pid"
+	}
+	teamsGreenDir := filepath.Join(appDataDir, "teams-green")
+	if err := os.MkdirAll(teamsGreenDir, 0o755); err != nil {
+		if tmpDir := os.Getenv("TEMP"); tmpDir != "" {
+			return filepath.Join(tmpDir, "teams-green.pid")
+		}
+		return "teams-green.pid"
+	}
+	return filepath.Join(teamsGreenDir, "teams-green.pid")
+}
 
 // Global log file handle that can be closed properly
 var (
@@ -123,7 +161,7 @@ var (
 )
 
 type LogFileCloser struct {
-	*os.File
+	file   *os.File
 	closed *bool
 	mu     *sync.RWMutex
 }
@@ -132,50 +170,24 @@ func (lfc *LogFileCloser) Write(p []byte) (n int, err error) {
 	lfc.mu.RLock()
 	defer lfc.mu.RUnlock()
 
-	if *lfc.closed || lfc.File == nil {
+	if *lfc.closed || lfc.file == nil {
 		return 0, fmt.Errorf("log file is closed")
 	}
-	return lfc.File.Write(p)
+	return lfc.file.Write(p)
 }
 
 func (lfc *LogFileCloser) Close() error {
 	lfc.mu.Lock()
 	defer lfc.mu.Unlock()
 
-	if *lfc.closed || lfc.File == nil {
+	if *lfc.closed || lfc.file == nil {
 		return nil // Already closed
 	}
 
 	*lfc.closed = true
-	err := lfc.File.Close()
-	lfc.File = nil
+	err := lfc.file.Close()
+	lfc.file = nil
 	return err
-}
-
-func init() {
-	// Use %LOCALAPPDATA%\teams-green
-	appDataDir := os.Getenv("LOCALAPPDATA")
-	if appDataDir == "" {
-		// Fallback to temp directory if LOCALAPPDATA is not available
-		if tmpDir := os.Getenv("TEMP"); tmpDir != "" {
-			PidFile = filepath.Join(tmpDir, "teams-green.pid")
-		} else {
-			PidFile = "teams-green.pid"
-		}
-	} else {
-		teamsGreenDir := filepath.Join(appDataDir, "teams-green")
-		// Create directory if it doesn't exist
-		if err := os.MkdirAll(teamsGreenDir, 0o755); err != nil {
-			// Fallback to temp if we can't create the directory
-			if tmpDir := os.Getenv("TEMP"); tmpDir != "" {
-				PidFile = filepath.Join(tmpDir, "teams-green.pid")
-			} else {
-				PidFile = "teams-green.pid"
-			}
-		} else {
-			PidFile = filepath.Join(teamsGreenDir, "teams-green.pid")
-		}
-	}
 }
 
 func InitLogger(cfg *Config) {
@@ -238,7 +250,7 @@ func setupLogFile(cfg *Config) (io.Writer, error) {
 		logFile = nil
 	}
 
-	file, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	file, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
@@ -246,7 +258,7 @@ func setupLogFile(cfg *Config) (io.Writer, error) {
 	logFile = file
 	logFileClosed = false
 	return &LogFileCloser{
-		File:   file,
+		file:   file,
 		closed: &logFileClosed,
 		mu:     &logFileMutex,
 	}, nil
@@ -348,67 +360,67 @@ func cleanupOldLogs(cfg *Config) error {
 
 // Validate validates the configuration and returns any errors
 func (cfg *Config) Validate() error {
-	var errors []string
+	var errs []string
 
-	errors = append(errors, cfg.validateInterval()...)
-	errors = append(errors, cfg.validateTiming()...)
-	errors = append(errors, cfg.validateWebSocket()...)
-	errors = append(errors, cfg.validateActivityMode()...)
-	errors = append(errors, cfg.validateLogConfig()...)
+	errs = append(errs, cfg.validateInterval()...)
+	errs = append(errs, cfg.validateTiming()...)
+	errs = append(errs, cfg.validateWebSocket()...)
+	errs = append(errs, cfg.validateActivityMode()...)
+	errs = append(errs, cfg.validateLogConfig()...)
 
-	if len(errors) > 0 {
-		return fmt.Errorf("configuration validation failed:\n  - %s", strings.Join(errors, "\n  - "))
+	if len(errs) > 0 {
+		return fmt.Errorf("configuration validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 
 	return nil
 }
 
 func (cfg *Config) validateInterval() []string {
-	var errors []string
+	var errs []string
 	if cfg.Interval < 10 {
-		errors = append(errors, "interval must be at least 10 seconds")
+		errs = append(errs, "interval must be at least 10 seconds")
 	}
 	if cfg.Interval > 3600 {
-		errors = append(errors, "interval must be no more than 3600 seconds (1 hour)")
+		errs = append(errs, "interval must be no more than 3600 seconds (1 hour)")
 	}
-	return errors
+	return errs
 }
 
 func (cfg *Config) validateTiming() []string {
-	var errors []string
+	var errs []string
 	if cfg.FocusDelayMs < 0 || cfg.FocusDelayMs > 1000 {
-		errors = append(errors, "focus delay must be between 0 and 1000 milliseconds")
+		errs = append(errs, "focus delay must be between 0 and 1000 milliseconds")
 	}
 	if cfg.RestoreDelayMs < 0 || cfg.RestoreDelayMs > 1000 {
-		errors = append(errors, "restore delay must be between 0 and 1000 milliseconds")
+		errs = append(errs, "restore delay must be between 0 and 1000 milliseconds")
 	}
 	if cfg.KeyProcessDelayMs < 0 || cfg.KeyProcessDelayMs > 5000 {
-		errors = append(errors, "key process delay must be between 0 and 5000 milliseconds")
+		errs = append(errs, "key process delay must be between 0 and 5000 milliseconds")
 	}
 	if cfg.InputThresholdMs < 0 || cfg.InputThresholdMs > 5000 {
-		errors = append(errors, "input threshold must be between 0 and 5000 milliseconds")
+		errs = append(errs, "input threshold must be between 0 and 5000 milliseconds")
 	}
-	return errors
+	return errs
 }
 
 func (cfg *Config) validateWebSocket() []string {
-	var errors []string
+	var errs []string
 	if cfg.WebSocketReadTimeout < 0 || cfg.WebSocketReadTimeout > 3600 {
-		errors = append(errors, "WebSocket read timeout must be between 0 and 3600 seconds")
+		errs = append(errs, "WebSocket read timeout must be between 0 and 3600 seconds")
 	}
 	if cfg.WebSocketWriteTimeout < 0 || cfg.WebSocketWriteTimeout > 3600 {
-		errors = append(errors, "WebSocket write timeout must be between 0 and 3600 seconds")
+		errs = append(errs, "WebSocket write timeout must be between 0 and 3600 seconds")
 	}
 	if cfg.WebSocketIdleTimeout < 0 || cfg.WebSocketIdleTimeout > 36000 {
-		errors = append(errors, "WebSocket idle timeout must be between 0 and 36000 seconds")
+		errs = append(errs, "WebSocket idle timeout must be between 0 and 36000 seconds")
 	}
 
 	if cfg.WebSocket {
 		if cfg.Port < 1024 {
-			errors = append(errors, "port must be at least 1024")
+			errs = append(errs, "port must be at least 1024")
 		}
 		if cfg.Port > 65535 {
-			errors = append(errors, "port must be no more than 65535")
+			errs = append(errs, "port must be no more than 65535")
 		}
 		// Security: Warn about commonly used ports that might conflict
 		commonPorts := []int{80, 443, 8080, 8443, 3000, 3001, 5000, 5001}
@@ -422,72 +434,72 @@ func (cfg *Config) validateWebSocket() []string {
 		// Verify the port is available (best-effort). This attempts a bind and then
 		// immediately releases it. If unavailable, treat as validation error.
 		if err := checkPortAvailable(cfg.Port); err != nil {
-			errors = append(errors, fmt.Sprintf("port %d is unavailable: %v", cfg.Port, err))
+			errs = append(errs, fmt.Sprintf("port %d is unavailable: %v", cfg.Port, err))
 		}
 	}
-	return errors
+	return errs
 }
 
 func (cfg *Config) validateActivityMode() []string {
-	var errors []string
+	var errs []string
 	if cfg.ActivityMode != "" {
 		am := strings.ToLower(cfg.ActivityMode)
 		if am != "focus" && am != "global" {
-			errors = append(errors, "activity mode must be 'focus' or 'global'")
+			errs = append(errs, "activity mode must be 'focus' or 'global'")
 		}
 	}
-	return errors
+	return errs
 }
 
 func (cfg *Config) validateLogConfig() []string {
-	var errors []string
+	var errs []string
 	// Validate log format with additional security
 	if cfg.LogFormat != "" && cfg.LogFormat != "text" && cfg.LogFormat != "json" {
-		errors = append(errors, "log format must be 'text' or 'json'")
+		errs = append(errs, "log format must be 'text' or 'json'")
 	}
 
 	// Validate log file path with security checks
 	if cfg.LogFile != "" {
 		if !filepath.IsAbs(cfg.LogFile) {
-			errors = append(errors, "log file path must be absolute")
+			errs = append(errs, "log file path must be absolute")
 		}
 
 		// Security: Prevent path traversal attacks
 		if strings.Contains(cfg.LogFile, "..") {
-			errors = append(errors, "log file path cannot contain '..' (path traversal protection)")
+			errs = append(errs, "log file path cannot contain '..' (path traversal protection)")
 		}
 
 		// Security: Ensure log file is in safe directory
 		logDir := filepath.Dir(cfg.LogFile)
 		if err := validateLogDirectory(logDir); err != nil {
-			errors = append(errors, fmt.Sprintf("log directory validation failed: %v", err))
+			errs = append(errs, fmt.Sprintf("log directory validation failed: %v", err))
 		}
 
 		// Check if directory exists or can be created
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
-			errors = append(errors, fmt.Sprintf("cannot create log directory: %v", err))
+			errs = append(errs, fmt.Sprintf("cannot create log directory: %v", err))
 		}
 	}
 
 	// Validate log rotation settings
 	if cfg.LogRotate {
 		if cfg.LogFile == "" {
-			errors = append(errors, "log file must be specified when log rotation is enabled")
+			errs = append(errs, "log file must be specified when log rotation is enabled")
 		}
 		if cfg.MaxLogSize < 1 {
-			errors = append(errors, "max log size must be at least 1 MB")
+			errs = append(errs, "max log size must be at least 1 MB")
 		}
 		if cfg.MaxLogSize > 1000 {
-			errors = append(errors, "max log size must be no more than 1000 MB")
+			errs = append(errs, "max log size must be no more than 1000 MB")
 		}
 		if cfg.MaxLogAge < 1 {
-			errors = append(errors, "max log age must be at least 1 day")
+			errs = append(errs, "max log age must be at least 1 day")
 		}
 		if cfg.MaxLogAge > 365 {
-			errors = append(errors, "max log age must be no more than 365 days")
+			errs = append(errs, "max log age must be no more than 365 days")
 		}
 	}
-	return errors
+	return errs
 }
 
 func validateLogDirectory(logDir string) error {

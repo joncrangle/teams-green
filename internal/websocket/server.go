@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/joncrangle/teams-green/internal/config"
 	"golang.org/x/net/websocket"
 )
 
@@ -41,25 +42,11 @@ type Server struct {
 	done     chan struct{}
 	port     int
 	state    *ServiceState
-	config   ConfigProvider
-}
-
-// ConfigProvider defines the interface for accessing configuration values
-// needed by the WebSocket server and related components.
-type ConfigProvider interface {
-	GetFocusDelay() time.Duration
-	GetRestoreDelay() time.Duration
-	GetKeyProcessDelay() time.Duration
-	GetInputThreshold() time.Duration
-	IsDebugEnabled() bool
-	GetActivityMode() string
-	GetWebSocketReadTimeout() time.Duration
-	GetWebSocketWriteTimeout() time.Duration
-	GetWebSocketIdleTimeout() time.Duration
+	config   config.ConfigProvider
 }
 
 // NewServer creates a new WebSocket server instance.
-func NewServer(port int, state *ServiceState, config ConfigProvider) *Server {
+func NewServer(port int, state *ServiceState, config config.ConfigProvider) *Server {
 	return &Server{
 		port:   port,
 		state:  state,
@@ -212,10 +199,9 @@ func (s *Server) createWebSocketHandler() websocket.Handler {
 // createHTTPServer creates an HTTP server with appropriate timeouts.
 func (s *Server) createHTTPServer(handler websocket.Handler) *http.Server {
 	return &http.Server{
-		Handler:      handler,
-		ReadTimeout:  s.config.GetWebSocketReadTimeout(),
-		WriteTimeout: s.config.GetWebSocketWriteTimeout(),
-		IdleTimeout:  s.config.GetWebSocketIdleTimeout(),
+		Handler:           handler,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 }
 
