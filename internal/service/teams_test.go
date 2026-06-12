@@ -5,7 +5,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/joncrangle/teams-green/internal/config"
 	"github.com/joncrangle/teams-green/internal/websocket"
@@ -16,92 +15,57 @@ func TestEnumWindowsProcValidation(t *testing.T) {
 	tests := []struct {
 		name        string
 		hwnd        syscall.Handle
-		lParam      uintptr
+		ctx         *WindowEnumContext
 		want        uintptr
 		description string
 	}{
 		{
 			name:        "zero hwnd should return early",
 			hwnd:        0,
-			lParam:      0,
+			ctx:         &WindowEnumContext{windows: &[]WindowInfo{}, teamsExecutables: []string{"teams.exe"}},
 			want:        1,
 			description: "Function should validate hwnd parameter and return 1 for zero hwnd",
 		},
 		{
-			name:        "zero lParam should return early",
+			name:        "nil context should return early",
 			hwnd:        syscall.Handle(12345),
-			lParam:      0,
+			ctx:         nil,
 			want:        1,
-			description: "Function should validate lParam parameter and return 1 for zero lParam",
+			description: "Function should handle nil context and return 1",
 		},
 		{
-			name:        "nil pointer from lParam should return early",
+			name:        "nil windows should return early",
 			hwnd:        syscall.Handle(12345),
-			lParam:      uintptr(unsafe.Pointer(nil)),
+			ctx:         &WindowEnumContext{windows: nil, teamsExecutables: []string{"teams.exe"}},
 			want:        1,
-			description: "Function should handle nil pointer after unsafe conversion and return 1",
+			description: "Function should handle nil windows list and return 1",
+		},
+		{
+			name:        "nil teamsExecutables should return early",
+			hwnd:        syscall.Handle(12345),
+			ctx:         &WindowEnumContext{windows: &[]WindowInfo{}, teamsExecutables: nil},
+			want:        1,
+			description: "Function should handle nil teamsExecutables and return 1",
+		},
+		{
+			name:        "valid context with non-Teams window should proceed",
+			hwnd:        syscall.Handle(12345),
+			ctx:         &WindowEnumContext{windows: &[]WindowInfo{}, teamsExecutables: []string{"notepad.exe"}},
+			want:        1,
+			description: "Function should process valid context and return 1 for non-Teams window",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := enumWindowsProc(tt.hwnd, tt.lParam)
+			enumWindowsCtx = tt.ctx
+			defer func() { enumWindowsCtx = nil }()
+			got := enumWindowsProc(tt.hwnd, 0)
 			if got != tt.want {
 				t.Errorf("enumWindowsProc() = %v, want %v. %s", got, tt.want, tt.description)
 			}
 		})
 	}
-
-	t.Run("context with nil windows should return early", func(t *testing.T) {
-		ctx := &WindowEnumContext{
-			windows:          nil,
-			teamsExecutables: []string{"teams.exe"},
-		}
-
-		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
-		if got != 1 {
-			t.Errorf("enumWindowsProc() with nil windows = %v, want 1", got)
-		}
-	})
-
-	t.Run("context with nil teamsExecutables should return early", func(t *testing.T) {
-		var windows []WindowInfo
-		ctx := &WindowEnumContext{
-			windows:          &windows,
-			teamsExecutables: nil,
-		}
-
-		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
-		if got != 1 {
-			t.Errorf("enumWindowsProc() with nil teamsExecutables = %v, want 1", got)
-		}
-	})
-
-	t.Run("context with nil logger should return early", func(t *testing.T) {
-		var windows []WindowInfo
-		ctx := &WindowEnumContext{
-			windows:          &windows,
-			teamsExecutables: []string{"teams.exe"},
-		}
-
-		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
-		if got != 1 {
-			t.Errorf("enumWindowsProc() with nil logger = %v, want 1", got)
-		}
-	})
-
-	t.Run("valid context should proceed", func(t *testing.T) {
-		var windows []WindowInfo
-		ctx := &WindowEnumContext{
-			windows:          &windows,
-			teamsExecutables: []string{"notepad.exe"},
-		}
-
-		got := enumWindowsProc(syscall.Handle(12345), uintptr(unsafe.Pointer(ctx)))
-		if got != 1 {
-			t.Errorf("enumWindowsProc() with valid context = %v, want 1", got)
-		}
-	})
 }
 
 func TestTeamsManagerFindTeamsWindows(t *testing.T) {

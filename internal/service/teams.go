@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -62,6 +61,11 @@ var (
 	ErrUserInputActive = errors.New("user input active, deferring Teams activity")
 	errStage3Skipped   = errors.New("focus escalation stage 3 skipped")
 )
+
+// enumWindowsCtx holds context for EnumWindows callback.
+// Set before EnumWindows call, cleared immediately after.
+// Safe because EnumWindows is not called recursively.
+var enumWindowsCtx *WindowEnumContext
 
 // WindowInfo represents information about a window
 type WindowInfo struct {
@@ -210,24 +214,16 @@ func init() {
 	}
 }
 
-func enumWindowsProc(hwnd syscall.Handle, lParam uintptr) uintptr {
-	// Validate parameters
-	if hwnd == 0 || lParam == 0 {
+func enumWindowsProc(hwnd syscall.Handle, _ uintptr) uintptr {
+	if hwnd == 0 {
 		return 1
 	}
 
-	// Safe conversion from uintptr to unsafe.Pointer for Windows callback
-	// This is safe because lParam comes directly from Windows EnumWindows callback
-	// and we've validated it's non-zero above
-	//nolint:govet // Windows callback pattern requires unsafe pointer conversion
-	ctx := (*WindowEnumContext)(unsafe.Pointer(lParam))
-
-	// Safety checks after unsafe conversion
+	ctx := enumWindowsCtx
 	if ctx == nil {
 		return 1
 	}
 
-	// Validate all required context fields before use
 	if ctx.windows == nil || ctx.teamsExecutables == nil {
 		return 1
 	}
@@ -492,16 +488,17 @@ func (tm *TeamsManager) getCachedWindows() []win.HWND {
 // EnumerateTeamsWindows performs the actual window enumeration for Teams.
 func EnumerateTeamsWindows() []win.HWND {
 	var windowList []WindowInfo
-	ctx := &WindowEnumContext{
+	enumWindowsCtx = &WindowEnumContext{
 		windows:          &windowList,
 		teamsExecutables: teamsExecutables,
 	}
 
 	ret, _, err := procEnumWindows.Call(
 		syscall.NewCallback(enumWindowsProc),
-		uintptr(unsafe.Pointer(ctx)),
+		0,
 	)
-	runtime.KeepAlive(ctx)
+
+	enumWindowsCtx = nil
 
 	if ret == 0 {
 		slog.Debug("EnumWindows failed", slog.String("error", err.Error()))
