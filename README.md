@@ -33,6 +33,12 @@ Teams-Green runs in the background and periodically sends a key (F15) to keep yo
 go install github.com/joncrangle/teams-green@latest
 ```
 
+### Mise
+
+```bash
+mise use -g go:github.com/joncrangle/teams-green
+```
+
 ### Build From Source
 
 ```bash
