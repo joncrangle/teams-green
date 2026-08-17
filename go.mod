@@ -1,6 +1,6 @@
 module github.com/joncrangle/teams-green
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/lxn/win v0.0.0-20210218163916-a377121e959e
@@ -12,5 +12,5 @@ require (
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	golang.org/x/net v0.57.0
+	golang.org/x/net v0.58.0
 )
